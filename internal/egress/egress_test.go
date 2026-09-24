@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -88,23 +90,29 @@ func TestFindExitNode(t *testing.T) {
 	}
 }
 
+func mustParse(t *testing.T, y string) *config.Config {
+	t.Helper()
+	c, err := config.Parse([]byte(y))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
 func TestManagerNotStarted(t *testing.T) {
-	cfg, err := config.Parse([]byte(`
+	cfg := mustParse(t, `
 egress:
   - {name: us, exit_node: a}
   - {name: jp, exit_node: b}
   - {name: auto, type: fallback, members: [us, jp]}
 rules: []
-`))
-	if err != nil {
-		t.Fatal(err)
-	}
+`)
 	m, err := New(cfg, t.TempDir(), t.Logf)
 	if err != nil {
 		t.Fatal(err)
 	}
 	st := m.Status()
-	if len(st) != 3 || st[0].State != StateStarting || st[2].Kind != "group" || st[2].State == StateReady {
+	if len(st) != 3 || st[0].State != StateStopped || st[0].Hostname != "tailproxy-us" || st[2].Kind != "group" || st[2].State == StateReady {
 		t.Fatalf("status: %+v", st)
 	}
 	for _, target := range []string{"us", "auto"} {
@@ -115,21 +123,104 @@ rules: []
 	if _, _, err := m.Dial(context.Background(), "nope", "example.com", 443); err == nil {
 		t.Fatal("unknown egress")
 	}
-	if state, _ := m.Summary(); state != "degraded" {
-		t.Fatalf("summary %s", state)
+	if state, detail := m.Summary(); state != "degraded" || !strings.Contains(detail, "主节点") {
+		t.Fatalf("summary %s %s", state, detail)
+	}
+	if a := m.Account(); a.Main.Kind != "main" || a.Main.Hostname != DefaultMainHostname || a.AutoLogin {
+		t.Fatalf("account: %+v", a)
+	}
+	if peers, err := m.Peers(context.Background()); peers != nil || err != nil {
+		t.Fatalf("peers before login: %v %v", peers, err)
 	}
 	if err := m.Close(); err != nil {
 		t.Fatalf("close never-started manager: %v", err)
 	}
 }
 
-func TestHealthIntervalValidation(t *testing.T) {
-	cfg, _ := config.Parse([]byte(`
+func TestApplyAddsRemovesAndSwitches(t *testing.T) {
+	dir := t.TempDir()
+	m, err := New(mustParse(t, `
 egress:
   - {name: us, exit_node: a}
-  - {name: g, type: latency, members: [us], health_check: {url: "https://x", interval: 1s}}
+  - {name: jp, exit_node: b}
+`), dir, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jpDir := filepath.Join(dir, "tsnet", "jp")
+	if _, err := os.Stat(jpDir); err != nil {
+		t.Fatalf("jp state dir: %v", err)
+	}
+	err = m.Apply(mustParse(t, `
+egress:
+  - {name: cn, exit_node: VM-0-5-opencloudos, doh: 'https://223.5.5.5/dns-query'}
+  - {name: us, exit_node: ser647557941975}
+  - {name: g, type: latency, members: [us, cn]}
 `))
-	if _, err := New(cfg, t.TempDir(), t.Logf); err == nil || !strings.Contains(err.Error(), "at least 5s") {
-		t.Fatalf("got %v", err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := m.Status()
+	var names []string
+	for _, x := range st {
+		names = append(names, x.Name)
+	}
+	if strings.Join(names, ",") != "cn,us,g" {
+		t.Fatalf("order after apply: %v", names)
+	}
+	if st[1].ExitNode.Spec != "ser647557941975" || st[0].ExitNode.Spec != "VM-0-5-opencloudos" {
+		t.Fatalf("specs: %+v %+v", st[0].ExitNode, st[1].ExitNode)
+	}
+	if strings.Join(st[2].Members, ",") != "us,cn" {
+		t.Fatalf("group members: %v", st[2].Members)
+	}
+	if _, err := os.Stat(jpDir); !os.IsNotExist(err) {
+		t.Fatal("removed slot's state dir was not deleted")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "tsnet", "cn")); err != nil {
+		t.Fatalf("new slot's state dir: %v", err)
+	}
+}
+
+func TestAuthKey(t *testing.T) {
+	dir := t.TempDir()
+	m, err := New(mustParse(t, "rules: []\n"), dir, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.SetAuthKey("not-a-key"); err == nil {
+		t.Fatal("invalid key accepted")
+	}
+	key := "tskey-auth-kABCDEF123456-secretsecretsecret"
+	if err := m.SetAuthKey(key); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(dir, "tailscale.authkey")
+	if info, err := os.Stat(f); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("key file: %v %v", info, err)
+	}
+	a := m.Account()
+	if a.AuthKeySource != "file" || !a.AutoLogin || strings.Contains(a.AuthKeyHint, "secret") {
+		t.Fatalf("account after set: %+v", a)
+	}
+	// A new manager picks the saved key up.
+	m2, _ := New(mustParse(t, "rules: []\n"), dir, t.Logf)
+	if m2.Account().AuthKeySource != "file" {
+		t.Fatal("saved key not loaded")
+	}
+	if err := m.ClearAuthKey(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(f); !os.IsNotExist(err) || m.Account().AutoLogin {
+		t.Fatal("key not cleared")
+	}
+
+	t.Setenv("TP_TEST_AUTHKEY", key)
+	m3, _ := New(mustParse(t, "tailnet: {auth_key_env: TP_TEST_AUTHKEY}\n"), t.TempDir(), t.Logf)
+	if a := m3.Account(); a.AuthKeySource != "env:TP_TEST_AUTHKEY" || !a.AutoLogin {
+		t.Fatalf("env key: %+v", a)
+	}
+	if err := m3.SetAuthKey(key); err == nil || !strings.Contains(err.Error(), "环境变量") {
+		t.Fatalf("env key must not be replaced from the panel: %v", err)
 	}
 }

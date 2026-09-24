@@ -22,7 +22,18 @@ func Revision(data []byte) string {
 // formatting elsewhere survive; comments inside the old rules section do not.
 // If there is no rules section, one is appended.
 func ReplaceRules(data []byte, rules []Rule) ([]byte, error) {
-	block, err := encodeRules(rules)
+	return ReplaceSection(data, "rules", rules)
+}
+
+// ReplaceEgress is ReplaceRules for the top-level `egress:` section.
+func ReplaceEgress(data []byte, egress []Egress) ([]byte, error) {
+	return ReplaceSection(data, "egress", egress)
+}
+
+// ReplaceSection replaces the top-level key with a block sequence of
+// flow-style items (one line per item); see ReplaceRules.
+func ReplaceSection(data []byte, key string, items any) ([]byte, error) {
+	block, err := encodeSection(key, items)
 	if err != nil {
 		return nil, err
 	}
@@ -41,7 +52,7 @@ func ReplaceRules(data []byte, rules []Rule) ([]byte, error) {
 
 	keyIdx := -1
 	for i := 0; i < len(root.Content); i += 2 {
-		if root.Content[i].Value == "rules" {
+		if root.Content[i].Value == key {
 			keyIdx = i
 			break
 		}
@@ -50,7 +61,7 @@ func ReplaceRules(data []byte, rules []Rule) ([]byte, error) {
 		return append(withTrailingNewline(data), block...), nil
 	}
 	if root.Content[keyIdx].Column != 1 {
-		return nil, fmt.Errorf("unsupported layout: top-level rules key is not at column 1")
+		return nil, fmt.Errorf("unsupported layout: top-level %s key is not at column 1", key)
 	}
 
 	lines := strings.SplitAfter(string(data), "\n")
@@ -80,22 +91,22 @@ func ReplaceRules(data []byte, rules []Rule) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// encodeRules renders `rules:` with one flow-style mapping per rule, matching
+// encodeSection renders `key:` with one flow-style mapping per item, matching
 // the style of config.example.yaml.
-func encodeRules(rules []Rule) ([]byte, error) {
+func encodeSection(key string, items any) ([]byte, error) {
 	var seq yaml.Node
-	if err := seq.Encode(rules); err != nil {
+	if err := seq.Encode(items); err != nil {
 		return nil, err
 	}
 	seq.Style = 0
 	for _, item := range seq.Content {
-		item.Style = yaml.FlowStyle
+		setFlow(item)
 	}
-	if len(rules) == 0 {
+	if len(seq.Content) == 0 {
 		seq.Style = yaml.FlowStyle
 	}
 	top := yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
-		{Kind: yaml.ScalarNode, Value: "rules"},
+		{Kind: yaml.ScalarNode, Value: key},
 		&seq,
 	}}
 	var buf bytes.Buffer
@@ -108,6 +119,15 @@ func encodeRules(rules []Rule) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+func setFlow(n *yaml.Node) {
+	if n.Kind == yaml.MappingNode || n.Kind == yaml.SequenceNode {
+		n.Style = yaml.FlowStyle
+	}
+	for _, c := range n.Content {
+		setFlow(c)
+	}
 }
 
 func withTrailingNewline(data []byte) []byte {

@@ -51,6 +51,8 @@ func TestValidateErrors(t *testing.T) {
 		{"bad listen", "panel: {listen: '7708'}", "panel.listen"},
 		{"doh hostname", "egress: [{name: cn, exit_node: x, doh: 'https://dns.alidns.com/dns-query'}]", "must be an IP"},
 		{"doh http", "dns: {per_egress_doh: 'http://1.1.1.1/dns-query'}", "https://"},
+		{"health interval", "egress: [{name: a, exit_node: x}, {name: g, type: latency, members: [a], health_check: {url: 'https://x', interval: 1s}}]", "at least 5s"},
+		{"bad egress name", "egress: [{name: US, exit_node: x}]", "a-z"},
 		{"doh on group", "egress: [{name: a, exit_node: x}, {name: g, type: fallback, members: [a], doh: 'https://1.1.1.1/dns-query'}]", "per slot"},
 	}
 	for _, tt := range tests {

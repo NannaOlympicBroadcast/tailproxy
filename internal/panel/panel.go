@@ -44,10 +44,14 @@ type Component struct {
 type Runtime interface {
 	Components() []Component
 	Egress() any
-	// ExitNodes lists the exit nodes offered in the tailnet (nil before
-	// any slot has logged in).
-	ExitNodes(ctx context.Context) (any, error)
 	Connections() any
+	// Tailnet returns the account (main node login, auth key status) and
+	// the tailnet's devices; devices are nil before the main node is in.
+	Tailnet(ctx context.Context) (account any, peers any, err error)
+	// ApplyEgress makes the running egress slots match cfg.Egress.
+	ApplyEgress(cfg *config.Config) error
+	SetAuthKey(key string) error
+	ClearAuthKey() error
 }
 
 // Server is the web panel. Create it with New and run it with ListenAndServe.
@@ -226,6 +230,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/config", s.auth(s.handleConfig))
 	mux.HandleFunc("POST /api/v1/config/reload", s.auth(s.handleReload))
 	mux.HandleFunc("GET /api/v1/egress", s.auth(s.handleEgress))
+	mux.HandleFunc("PUT /api/v1/egress", s.auth(s.handleEgressPut))
+	mux.HandleFunc("GET /api/v1/tailnet", s.auth(s.handleTailnet))
+	mux.HandleFunc("PUT /api/v1/tailnet/authkey", s.auth(s.handleAuthKeyPut))
+	mux.HandleFunc("DELETE /api/v1/tailnet/authkey", s.auth(s.handleAuthKeyDelete))
 	mux.HandleFunc("GET /api/v1/connections", s.auth(s.handleConnections))
 	mux.HandleFunc("GET /api/v1/rules", s.auth(s.handleRules))
 	mux.HandleFunc("PUT /api/v1/rules", s.auth(s.handleRulesPut))
@@ -351,18 +359,27 @@ func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
 	s.reloadsOK.Add(1)
 	cfg, engine, _ := s.snapshot()
 	resp := map[string]any{"ok": true, "rules": engine.Len()}
+	var warnings []string
+	if s.runtime != nil && (!sameJSON(cfg.Egress, old.Egress) || cfg.DNS.PerEgressDoH != old.DNS.PerEgressDoH) {
+		if err := s.runtime.ApplyEgress(cfg); err != nil {
+			warnings = append(warnings, "应用出口配置失败："+err.Error())
+		}
+	}
 	var restart []string
 	if cfg.Panel != old.Panel {
 		restart = append(restart, "panel")
 	}
-	if !sameJSON(cfg.Egress, old.Egress) || !sameJSON(cfg.Tailnet, old.Tailnet) {
-		restart = append(restart, "egress / tailnet")
+	if !sameJSON(cfg.Tailnet, old.Tailnet) {
+		restart = append(restart, "tailnet")
 	}
-	if !sameJSON(cfg.Capture, old.Capture) || !sameJSON(cfg.DNS, old.DNS) {
-		restart = append(restart, "capture / dns")
+	if !sameJSON(cfg.Capture, old.Capture) {
+		restart = append(restart, "capture")
 	}
 	if len(restart) > 0 {
-		resp["warning"] = "规则已生效；" + strings.Join(restart, "、") + " 配置的变更需要重启 tailproxy 才会生效"
+		warnings = append(warnings, "规则和出口已生效；"+strings.Join(restart, "、")+" 配置的变更需要重启 tailproxy 才会生效")
+	}
+	if len(warnings) > 0 {
+		resp["warning"] = strings.Join(warnings, "；")
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -373,13 +390,55 @@ func (s *Server) handleEgress(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"configured": cfg.Egress, "runtime": nil, "detail": egressNotRunning})
 		return
 	}
-	resp := map[string]any{"configured": cfg.Egress, "runtime": s.runtime.Egress()}
-	if nodes, err := s.runtime.ExitNodes(r.Context()); err != nil {
-		resp["exit_nodes_error"] = err.Error()
-	} else {
-		resp["exit_nodes"] = nodes
+	s.mu.RLock()
+	rev := s.rev
+	s.mu.RUnlock()
+	writeJSON(w, http.StatusOK, map[string]any{"configured": cfg.Egress, "runtime": s.runtime.Egress(), "revision": rev})
+}
+
+// handleTailnet returns the main node's login state, the auth key status and
+// the tailnet's devices.
+func (s *Server) handleTailnet(w http.ResponseWriter, r *http.Request) {
+	if s.runtime == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "proxy is not running"})
+		return
+	}
+	account, peers, err := s.runtime.Tailnet(r.Context())
+	resp := map[string]any{"account": account, "peers": peers}
+	if err != nil {
+		resp["peers_error"] = err.Error()
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleAuthKeyPut(w http.ResponseWriter, r *http.Request) {
+	if s.runtime == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "proxy is not running"})
+		return
+	}
+	var req struct {
+		AuthKey string `json:"auth_key"`
+	}
+	if !decodeJSONBody(w, r, &req) {
+		return
+	}
+	if err := s.runtime.SetAuthKey(req.AuthKey); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleAuthKeyDelete(w http.ResponseWriter, r *http.Request) {
+	if s.runtime == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "proxy is not running"})
+		return
+	}
+	if err := s.runtime.ClearAuthKey(); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request) {

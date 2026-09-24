@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/NannaOlympicBroadcast/tailproxy/internal/config"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/egress"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/panel"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/proxy"
@@ -35,12 +36,18 @@ func (r *runtimeView) Components() []panel.Component {
 
 func (r *runtimeView) Egress() any { return r.egress.Status() }
 
-func (r *runtimeView) ExitNodes(ctx context.Context) (any, error) {
-	nodes, err := r.egress.ExitNodes(ctx)
-	if nodes == nil || err != nil {
-		return nil, err
+func (r *runtimeView) Tailnet(ctx context.Context) (any, any, error) {
+	peers, err := r.egress.Peers(ctx)
+	if peers == nil {
+		return r.egress.Account(), nil, err
 	}
-	return nodes, nil
+	return r.egress.Account(), peers, err
 }
+
+func (r *runtimeView) ApplyEgress(cfg *config.Config) error { return r.egress.Apply(cfg) }
+
+func (r *runtimeView) SetAuthKey(key string) error { return r.egress.SetAuthKey(key) }
+
+func (r *runtimeView) ClearAuthKey() error { return r.egress.ClearAuthKey() }
 
 func (r *runtimeView) Connections() any { return r.tracker.Snapshot() }

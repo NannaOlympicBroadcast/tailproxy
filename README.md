@@ -121,6 +121,15 @@ TAILPROXY_PANEL_TOKEN='至少16个字符的令牌' ./tailproxy start -c config.e
 
 配置里的每个出口槽位（`egress` 中没有 `type` 的条目）都会在进程内启动一个独立的 Tailscale 节点：主机名为 `tailproxy-<名称>`，状态保存在 `<state-dir>/tsnet/<名称>`，重启后仍是同一台设备。节点上线后，会按 `exit_node` 在 tailnet 中查找出口节点，可以写主机名、MagicDNS 名、100.x IP 或 StableID，找到后把它设为该节点的出口。
 
+**统一登录与可视化配置（面板「出口」页）**：
+
+1. tailproxy 始终运行一个主节点（主机名 `tailproxy`，可用 `tailnet.hostname` 修改）。在「Tailscale 账号」里点「登录 Tailscale」**登录一次**即可。
+2. 主节点登录后，「你账号下的设备」会列出 tailnet 中的所有设备：在线状态、最后在线时间、IP、系统、所有者，以及是否已批准为出口节点。
+3. 对已批准的出口节点点「添加为出口」，就会新建一个出口：写回配置文件的 `egress:` 段，并立即启动对应的设备 `tailproxy-<名称>`。已配置的出口可以直接换成另一个出口节点，也可以删除；删除时，对应设备会从 tailnet 注销，本地状态也会删除。仍被规则引用的出口不能删除（保存时会报错）。
+4. 因为每个出口都是一台独立的 Tailscale 设备，所以：
+   - 在「自动登录（auth key）」里保存一个可重复使用的 auth key 后，新增出口会自动加入 tailnet；
+   - 不保存 key 时，每个新出口要在列表里点一次「授权这台设备」。
+
 **加入 tailnet** 有两种方式：
 
 - **推荐**：在 Tailscale 管理后台生成一个**可重复使用**的 auth key，放进 `tailnet.auth_key_env` 指向的环境变量（默认 `TS_AUTHKEY`）后启动：

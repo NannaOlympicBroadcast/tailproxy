@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -46,6 +47,9 @@ type Config struct {
 }
 
 type Tailnet struct {
+	// Hostname of the main node, the one you log in once with. Default
+	// "tailproxy". Egress slots are named tailproxy-<egress name>.
+	Hostname      string   `yaml:"hostname,omitempty" json:"hostname,omitempty"`
 	ControlURL    string   `yaml:"control_url" json:"control_url"`
 	AuthKeyEnv    string   `yaml:"auth_key_env" json:"auth_key_env"`
 	AdvertiseTags []string `yaml:"advertise_tags" json:"advertise_tags"`
@@ -173,6 +177,8 @@ func (c *Config) Validate() error {
 			continue
 		case IsReservedTarget(e.Name):
 			errs = append(errs, fmt.Errorf("egress[%d]: name %q is reserved", i, e.Name))
+		case !validEgressName(e.Name):
+			errs = append(errs, fmt.Errorf("egress[%d]: name %q must be 1-40 characters of a-z, 0-9 and '-' (used in the device hostname)", i, e.Name))
 		case names[e.Name]:
 			errs = append(errs, fmt.Errorf("egress[%d]: duplicate name %q", i, e.Name))
 		}
@@ -192,6 +198,14 @@ func (c *Config) Validate() error {
 			}
 			if len(e.Members) == 0 {
 				errs = append(errs, fmt.Errorf("egress %q: group needs members", e.Name))
+			}
+			if hc := e.HealthCheck; hc != nil {
+				if d, err := time.ParseDuration(hc.Interval); err != nil || d < 5*time.Second {
+					errs = append(errs, fmt.Errorf("egress %q: health_check.interval %q must be a duration of at least 5s", e.Name, hc.Interval))
+				}
+				if hc.URL == "" {
+					errs = append(errs, fmt.Errorf("egress %q: health_check.url is required", e.Name))
+				}
 			}
 		default:
 			errs = append(errs, fmt.Errorf("egress %q: unknown type %q (want fallback or latency)", e.Name, e.Type))
@@ -262,6 +276,23 @@ func (c *Config) Validate() error {
 	}
 	return errors.Join(errs...)
 }
+
+// validEgressName: lower-case letters, digits and '-', not starting with '-'.
+// The name becomes part of a directory and of the hostname tailproxy-<name>.
+func validEgressName(n string) bool {
+	if len(n) == 0 || len(n) > 40 || n[0] == '-' {
+		return false
+	}
+	for _, r := range n {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidEgressName reports whether n is usable as an egress name.
+func ValidEgressName(n string) bool { return validEgressName(n) }
 
 // checkDoHURL requires https:// with an IP-literal host, so resolving a name
 // through an exit node never needs a lookup outside that exit node.

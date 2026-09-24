@@ -28,86 +28,152 @@ type rulesUpdate struct {
 // of the config file (keeping the rest of the file byte-for-byte, with a .bak
 // copy of the previous file) and swaps it into the running engine.
 func (s *Server) handleRulesPut(w http.ResponseWriter, r *http.Request) {
-	if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt != "application/json" {
-		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "Content-Type must be application/json"})
-		return
-	}
 	var req rulesUpdate
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRulesBody))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 	if req.Rules == nil {
 		req.Rules = []config.Rule{}
 	}
+	res, ok := s.saveSection(w, req.Revision,
+		func(c *config.Config) { c.Rules = req.Rules },
+		func(data []byte) ([]byte, error) { return config.ReplaceRules(data, req.Rules) })
+	if !ok {
+		return
+	}
+	s.ruleSaves.Add(1)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":       true,
+		"rules":    res.engine.Len(),
+		"revision": res.revision,
+		"backup":   res.backup,
+	})
+}
 
+type egressUpdate struct {
+	Revision string          `json:"revision"`
+	Egress   []config.Egress `json:"egress"`
+}
+
+// handleEgressPut saves the `egress:` section like handleRulesPut and applies
+// it to the running egress manager: new slots start, removed ones are logged
+// out, changed exit nodes are switched. Rules that still point at a removed
+// egress make the whole save fail validation.
+func (s *Server) handleEgressPut(w http.ResponseWriter, r *http.Request) {
+	var req egressUpdate
+	if !decodeJSONBody(w, r, &req) {
+		return
+	}
+	if req.Egress == nil {
+		req.Egress = []config.Egress{}
+	}
+	res, ok := s.saveSection(w, req.Revision,
+		func(c *config.Config) { c.Egress = req.Egress },
+		func(data []byte) ([]byte, error) { return config.ReplaceEgress(data, req.Egress) })
+	if !ok {
+		return
+	}
+	resp := map[string]any{"ok": true, "revision": res.revision, "backup": res.backup}
+	if s.runtime != nil {
+		if err := s.runtime.ApplyEgress(res.cfg); err != nil {
+			resp["warning"] = "配置已保存，但应用到运行中的出口时出错：" + err.Error()
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+type saveResult struct {
+	cfg      *config.Config
+	engine   *rule.Engine
+	revision string
+	backup   string
+}
+
+// saveSection is the shared write path for panel edits: optimistic
+// concurrency on the file revision, full validation of the edited config,
+// rewrite of one top-level section only, round-trip check, .bak copy and
+// atomic replace, then swap into the running state. On failure it has
+// written the HTTP error and returns ok=false.
+func (s *Server) saveSection(w http.ResponseWriter, revision string, mutate func(*config.Config), rewrite func([]byte) ([]byte, error)) (saveResult, bool) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
 	path, err := filepath.EvalSymlinks(s.cfgPath)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
+		return saveResult{}, false
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
+		return saveResult{}, false
 	}
 	s.mu.RLock()
 	cfg, loadedRev := s.cfg, s.rev
 	s.mu.RUnlock()
-	if diskRev := config.Revision(data); req.Revision != loadedRev || diskRev != loadedRev {
+	if diskRev := config.Revision(data); revision != loadedRev || diskRev != loadedRev {
 		writeJSON(w, http.StatusConflict, map[string]string{
 			"error": "配置文件在你开始编辑后发生了变化（手动修改、重新加载或其他会话保存）。请重新加载配置后再编辑。",
 		})
-		return
+		return saveResult{}, false
 	}
 
-	engine, err := compileDraft(cfg, req.Rules)
+	want := *cfg
+	mutate(&want)
+	if err := want.Validate(); err != nil {
+		writeValidationError(w, err)
+		return saveResult{}, false
+	}
+	engine, err := rule.Compile(want.Rules)
 	if err != nil {
 		writeValidationError(w, err)
-		return
+		return saveResult{}, false
 	}
 
-	out, err := config.ReplaceRules(data, req.Rules)
+	out, err := rewrite(data)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "rewrite config: " + err.Error()})
-		return
+		return saveResult{}, false
 	}
-	// The written file must parse back to exactly the requested rules and
+	// The written file must parse back to exactly the requested config and
 	// leave everything else unchanged; otherwise refuse to touch the file.
 	newCfg, err := config.Parse(out)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "rewritten config does not parse: " + err.Error()})
-		return
+		return saveResult{}, false
 	}
-	want := *cfg
-	want.Rules = req.Rules
 	if !sameJSON(newCfg, &want) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "rewritten config does not round-trip; file left unchanged"})
-		return
+		return saveResult{}, false
 	}
 
 	backup := path + ".bak"
 	if err := writeFileAtomic(path, backup, data, out); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
+		return saveResult{}, false
 	}
 
 	s.mu.Lock()
 	s.cfg, s.engine, s.rev = newCfg, engine, config.Revision(out)
 	rev := s.rev
 	s.mu.Unlock()
-	s.ruleSaves.Add(1)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":       true,
-		"rules":    engine.Len(),
-		"revision": rev,
-		"backup":   backup,
-	})
+	return saveResult{cfg: newCfg, engine: engine, revision: rev, backup: backup}, true
+}
+
+// decodeJSONBody requires Content-Type: application/json and decodes the body
+// strictly into v. On failure it has written the HTTP error.
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt != "application/json" {
+		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "Content-Type must be application/json"})
+		return false
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRulesBody))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+		return false
+	}
+	return true
 }
 
 // compileDraft validates rules against the current config (egress names etc.)

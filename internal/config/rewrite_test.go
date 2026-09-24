@@ -97,3 +97,49 @@ func TestReplaceRulesMultilineFlow(t *testing.T) {
 		t.Fatalf("got %q", out)
 	}
 }
+
+func TestReplaceEgress(t *testing.T) {
+	in := `tailnet: {control_url: https://controlplane.tailscale.com}   # keep
+egress:
+  - {name: us, exit_node: a}   # old
+rules:
+  - {domain: [a.com], egress: us}
+`
+	eg := []Egress{
+		{Name: "us", ExitNode: "ser647557941975"},
+		{Name: "cn", ExitNode: "VM-0-5-opencloudos", DoH: "https://223.5.5.5/dns-query"},
+		{Name: "auto", Type: "fallback", Members: []string{"us", "cn"}, HealthCheck: &HealthCheck{URL: "https://www.gstatic.com/generate_204", Interval: "60s"}},
+	}
+	out, err := ReplaceEgress([]byte(in), eg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `tailnet: {control_url: https://controlplane.tailscale.com}   # keep
+egress:
+  - {name: us, exit_node: ser647557941975}
+  - {name: cn, exit_node: VM-0-5-opencloudos, doh: 'https://223.5.5.5/dns-query'}
+  - {name: auto, type: fallback, members: [us, cn], health_check: {url: 'https://www.gstatic.com/generate_204', interval: 60s}}
+rules:
+  - {domain: [a.com], egress: us}
+`
+	if string(out) != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", out, want)
+	}
+	c, err := Parse(out)
+	if err != nil || !reflect.DeepEqual(c.Egress, eg) {
+		t.Fatalf("round trip: %v\n%+v", err, c.Egress)
+	}
+}
+
+func TestEgressNameValidation(t *testing.T) {
+	for _, n := range []string{"us", "cn-2", "a1"} {
+		if !ValidEgressName(n) {
+			t.Errorf("%q should be valid", n)
+		}
+	}
+	for _, n := range []string{"", "US", "-a", "a_b", "中国", "a b", strings.Repeat("a", 41)} {
+		if ValidEgressName(n) {
+			t.Errorf("%q should be invalid", n)
+		}
+	}
+}

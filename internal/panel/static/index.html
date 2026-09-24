@@ -55,16 +55,37 @@
   </section>
 
   <section id="egress" class="tab" hidden>
-    <div class="banner warn" id="egress-detail"></div>
-    <div class="card">
-      <h2>出口</h2>
-      <p class="muted">每个槽位是一个独立的 tailnet 设备（主机名 tailproxy-&lt;名称&gt;），固定使用一个出口节点。没有配置 auth key 时，需要打开登录链接把它加入你的 tailnet。</p>
-      <table><thead><tr><th>名称</th><th>类型</th><th>出口节点 / 成员</th><th>状态</th><th>设备 / 健康</th></tr></thead><tbody id="egress-list"></tbody></table>
+    <div class="banner warn" id="egress-detail" hidden></div>
+    <div id="egress-msg" class="banner" hidden></div>
+
+    <div class="card" id="account-card">
+      <div class="card-head"><h2>Tailscale 账号</h2><span id="account-state"></span></div>
+      <div id="account-body"></div>
+      <details id="authkey-box" class="authkey">
+        <summary>自动登录（auth key）：<span id="authkey-status" class="muted"></span></summary>
+        <p class="muted">tailproxy 的每个出口都是一台独立的 Tailscale 设备。保存一个 <strong>可重复使用</strong> 的 auth key 后，新增的出口会自动加入 tailnet，不用逐个点授权链接；正在等待登录的节点也会立即用它登录。key 保存在状态目录的 <code>tailscale.authkey</code>（权限 600），面板里只显示开头几个字符。</p>
+        <form id="authkey-form" class="row">
+          <input id="authkey-input" type="password" autocomplete="off" placeholder="tskey-auth-…">
+          <button type="submit">保存</button>
+          <button type="button" id="authkey-clear" class="danger">删除已保存的 key</button>
+        </form>
+        <p class="muted"><a id="authkey-link" target="_blank" rel="noopener noreferrer">在 Tailscale 管理后台创建 auth key</a>（勾选 Reusable；建议同时勾选 Pre-approved）</p>
+      </details>
     </div>
+
     <div class="card">
-      <h2>tailnet 中可用的出口节点</h2>
-      <p class="muted">由已登录的槽位读取。把「名称」或 IP 填到配置里对应出口的 <code>exit_node</code>，重启后生效。</p>
-      <table><thead><tr><th>名称</th><th>Tailscale IP</th><th>系统</th><th>在线</th><th>被使用</th></tr></thead><tbody id="exit-nodes"></tbody></table>
+      <div class="card-head">
+        <h2>你账号下的设备</h2>
+        <label class="inline"><input type="checkbox" id="peers-online" checked> 只看在线</label>
+      </div>
+      <p class="muted">由主节点读取。已开启并批准为出口节点的设备，可以一键添加为 tailproxy 的出口。</p>
+      <table><thead><tr><th>设备</th><th>Tailscale IP</th><th>系统</th><th>状态</th><th>出口节点</th><th>操作</th></tr></thead><tbody id="peer-list"></tbody></table>
+    </div>
+
+    <div class="card">
+      <h2>已配置的出口</h2>
+      <p class="muted">每个出口是一台独立的 tailnet 设备（主机名 tailproxy-&lt;名称&gt;），固定使用一个出口节点。修改会写回配置文件的 <code>egress:</code> 段并立即生效。出口组（故障转移 / 延迟优选）目前请在配置文件里编辑。</p>
+      <table><thead><tr><th>名称</th><th>类型</th><th>出口节点 / 成员</th><th>状态</th><th>设备 / 健康</th><th>操作</th></tr></thead><tbody id="egress-list"></tbody></table>
     </div>
   </section>
 

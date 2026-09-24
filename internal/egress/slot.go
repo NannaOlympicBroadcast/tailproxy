@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"tailscale.com/ipn"
@@ -35,26 +35,34 @@ const (
 // carry traffic yet.
 var ErrNotReady = errors.New("egress not ready")
 
-// Slot is one embedded tsnet node pinned to one exit node (DESIGN §4.4).
+// Slot is one embedded tsnet node. An egress slot is pinned to one exit node
+// (DESIGN §4.4); the main slot has no exit node and is used for login,
+// listing the tailnet's devices and tailnet traffic.
 type Slot struct {
-	name string
-	spec string // exit node as configured: hostname, 100.x IP or StableID
-	srv  *tsnet.Server
-	doh  *DoH
-	logf func(string, ...any)
+	name      string // egress name; "" for the main slot
+	main      bool
+	hostname  string
+	dir       string
+	newServer func(s *Slot) *tsnet.Server
+	logf      func(string, ...any)
 
-	started atomic.Bool // srv.Start succeeded; tsnet.Server.Close panics otherwise
-
-	mu     sync.Mutex
-	status Status
-	exitID tailcfg.StableNodeID
-	health *Health
+	mu      sync.Mutex
+	spec    string // exit node as configured: hostname, 100.x IP or StableID
+	doh     *DoH
+	srv     *tsnet.Server
+	started bool // srv.Start succeeded; tsnet.Server.Close panics otherwise
+	cancel  context.CancelFunc
+	done    chan struct{}
+	status  Status
+	exitID  tailcfg.StableNodeID
+	selfID  tailcfg.StableNodeID
+	health  *Health
 }
 
 // Status is a slot's or group's runtime state as shown in the panel.
 type Status struct {
 	Name         string        `json:"name"`
-	Kind         string        `json:"kind"` // "slot" or "group"
+	Kind         string        `json:"kind"` // "slot", "group" or "main"
 	State        string        `json:"state"`
 	Detail       string        `json:"detail,omitempty"`
 	AuthURL      string        `json:"auth_url,omitempty"`
@@ -64,6 +72,8 @@ type Status struct {
 	Health       *Health       `json:"health,omitempty"`
 	Members      []string      `json:"members,omitempty"`
 	Selected     string        `json:"selected,omitempty"` // group: member currently used
+	LoginName    string        `json:"login_name,omitempty"`
+	Tailnet      string        `json:"tailnet,omitempty"`
 }
 
 // ExitNodeInfo describes the exit node a slot uses.
@@ -83,10 +93,22 @@ type Health struct {
 	Error   string    `json:"error,omitempty"`
 }
 
-func newSlot(name, spec string, srv *tsnet.Server, dohURL string, logf func(string, ...any)) *Slot {
-	s := &Slot{name: name, spec: spec, srv: srv, logf: logf}
-	s.status = Status{Name: name, Kind: "slot", State: StateStarting, Hostname: srv.Hostname, ExitNode: &ExitNodeInfo{Spec: spec}}
-	s.doh = NewDoH(dohURL, &http.Client{Transport: &http.Transport{
+func newSlot(name, hostname, spec, dir, dohURL string, main bool, newServer func(*Slot) *tsnet.Server, logf func(string, ...any)) *Slot {
+	s := &Slot{name: name, main: main, hostname: hostname, dir: dir, spec: spec, newServer: newServer, logf: logf}
+	kind := "slot"
+	if main {
+		kind = "main"
+	}
+	s.status = Status{Name: name, Kind: kind, State: StateStopped, Hostname: hostname}
+	if !main {
+		s.status.ExitNode = &ExitNodeInfo{Spec: spec}
+	}
+	s.doh = s.makeDoH(dohURL)
+	return s
+}
+
+func (s *Slot) makeDoH(url string) *DoH {
+	return NewDoH(url, &http.Client{Transport: &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			ap, err := netip.ParseAddrPort(addr)
 			if err != nil {
@@ -96,34 +118,104 @@ func newSlot(name, spec string, srv *tsnet.Server, dohURL string, logf func(stri
 		},
 		ForceAttemptHTTP2: true,
 	}})
-	return s
 }
 
-// run starts the node and keeps its status (and exit node pref) current.
-func (s *Slot) run(ctx context.Context) {
-	if ctx.Err() != nil {
+// start creates a fresh tsnet server and runs it until parent is cancelled
+// or stop is called. It is a no-op if the slot is already running.
+func (s *Slot) start(parent context.Context) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cancel != nil || parent.Err() != nil {
 		return
 	}
-	if err := s.srv.Start(); err != nil {
+	ctx, cancel := context.WithCancel(parent)
+	s.cancel, s.done = cancel, make(chan struct{})
+	s.srv = s.newServer(s)
+	s.started = false
+	s.status.State, s.status.Detail, s.status.AuthURL = StateStarting, "", ""
+	go s.run(ctx, s.srv, s.done)
+}
+
+// stop stops the node and waits for it; the tsnet state directory is kept.
+func (s *Slot) stop() {
+	s.mu.Lock()
+	cancel, done := s.cancel, s.done
+	s.mu.Unlock()
+	if cancel == nil {
+		return
+	}
+	cancel()
+	<-done
+	s.mu.Lock()
+	srv, started := s.srv, s.started
+	s.cancel, s.done, s.srv, s.started = nil, nil, nil, false
+	s.status.State, s.status.Detail, s.status.AuthURL = StateStopped, "", ""
+	s.mu.Unlock()
+	if started {
+		srv.Close()
+	}
+}
+
+// running reports whether start has been called and stop has not.
+func (s *Slot) running() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cancel != nil
+}
+
+func (s *Slot) run(ctx context.Context, srv *tsnet.Server, done chan struct{}) {
+	defer close(done)
+	if err := srv.Start(); err != nil {
 		s.set(func(st *Status) { st.State, st.Detail = StateError, err.Error() })
 		return
 	}
-	s.started.Store(true)
+	s.mu.Lock()
+	if s.srv == srv {
+		s.started = true
+	}
+	s.mu.Unlock()
 	t := time.NewTicker(3 * time.Second)
 	defer t.Stop()
 	for {
-		s.refresh(ctx)
+		s.refresh(ctx, srv)
 		select {
 		case <-ctx.Done():
-			s.set(func(st *Status) { st.State, st.Detail = StateStopped, "" })
 			return
 		case <-t.C:
 		}
 	}
 }
 
-func (s *Slot) refresh(ctx context.Context) {
-	lc, err := s.srv.LocalClient()
+// server returns the current tsnet server, or nil if the slot is stopped.
+func (s *Slot) server() *tsnet.Server {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.srv
+}
+
+// setSpec switches the slot to another exit node; the next refresh applies it.
+func (s *Slot) setSpec(spec string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.spec == spec {
+		return
+	}
+	s.spec, s.exitID = spec, ""
+	s.status.ExitNode = &ExitNodeInfo{Spec: spec}
+	if s.status.State == StateReady || s.status.State == StateExitNodeOffline {
+		s.status.State, s.status.Detail = StateExitNodePending, "正在切换出口节点"
+	}
+}
+
+func (s *Slot) setDoH(url string) {
+	d := s.makeDoH(url)
+	s.mu.Lock()
+	s.doh = d
+	s.mu.Unlock()
+}
+
+func (s *Slot) refresh(ctx context.Context, srv *tsnet.Server) {
+	lc, err := srv.LocalClient()
 	if err != nil {
 		s.set(func(st *Status) { st.State, st.Detail = StateError, err.Error() })
 		return
@@ -149,7 +241,7 @@ func (s *Slot) refresh(ctx context.Context) {
 	case ipn.NeedsLogin.String():
 		s.set(func(st *Status) {
 			st.State, st.AuthURL = StateNeedsLogin, ts.AuthURL
-			st.Detail = "需要登录：打开 auth_url，或设置 tailnet.auth_key_env 指向的 auth key 后重启"
+			st.Detail = "需要登录：打开登录链接授权，或在面板里保存一个 auth key，之后新加入的节点都会自动登录"
 		})
 		return
 	case ipn.NeedsMachineAuth.String():
@@ -162,8 +254,28 @@ func (s *Slot) refresh(ctx context.Context) {
 		return
 	}
 
+	if ts.Self != nil {
+		s.mu.Lock()
+		s.selfID = ts.Self.ID
+		s.mu.Unlock()
+	}
+	if s.main {
+		login := ""
+		if ts.Self != nil {
+			if u, ok := ts.User[ts.Self.UserID]; ok {
+				login = u.LoginName
+			}
+		}
+		tailnet := ""
+		if ts.CurrentTailnet != nil {
+			tailnet = ts.CurrentTailnet.Name
+		}
+		s.set(func(st *Status) { st.State, st.Detail, st.LoginName, st.Tailnet = StateReady, "", login, tailnet })
+		return
+	}
+
 	s.mu.Lock()
-	want := s.exitID
+	want, spec := s.exitID, s.spec
 	s.mu.Unlock()
 	if cur := ts.ExitNodeStatus; cur != nil && want != "" && cur.ID == want {
 		online := cur.Online
@@ -177,7 +289,7 @@ func (s *Slot) refresh(ctx context.Context) {
 		return
 	}
 
-	peer, err := findExitNode(ts, s.spec)
+	peer, err := findExitNode(ts, spec)
 	if err != nil {
 		s.set(func(st *Status) { st.State, st.Detail = StateExitNodePending, err.Error() })
 		return
@@ -192,7 +304,9 @@ func (s *Slot) refresh(ctx context.Context) {
 		return
 	}
 	s.mu.Lock()
-	s.exitID = peer.ID
+	if s.spec == spec { // not switched meanwhile
+		s.exitID = peer.ID
+	}
 	s.mu.Unlock()
 	s.logf("egress %s: exit node %s (%s) selected", s.name, peerName(peer), peer.ID)
 	s.set(func(st *Status) {
@@ -241,8 +355,10 @@ func (s *Slot) Status() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := s.status
-	en := *s.status.ExitNode
-	st.ExitNode = &en
+	if s.status.ExitNode != nil {
+		en := *s.status.ExitNode
+		st.ExitNode = &en
+	}
 	st.TailscaleIPs = append([]string(nil), s.status.TailscaleIPs...)
 	if s.health != nil {
 		h := *s.health
@@ -251,7 +367,8 @@ func (s *Slot) Status() Status {
 	return st
 }
 
-// Ready reports whether traffic can go through the exit node.
+// Ready reports whether traffic can go through the exit node (for the main
+// slot: whether it is logged in).
 func (s *Slot) Ready() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -269,6 +386,12 @@ func (s *Slot) tailnetUp() bool {
 	return false
 }
 
+func (s *Slot) needsLogin() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.status.State == StateNeedsLogin
+}
+
 // Dial connects to host:port through the slot's exit node. Domain names are
 // resolved with DoH through the same exit node, so no DNS query leaves via
 // the local network.
@@ -281,7 +404,10 @@ func (s *Slot) Dial(ctx context.Context, host string, port uint16) (net.Conn, er
 	if ip, err := netip.ParseAddr(host); err == nil {
 		addrs = []netip.Addr{ip.Unmap()}
 	} else {
-		if addrs, err = s.doh.Lookup(ctx, host); err != nil {
+		s.mu.Lock()
+		doh := s.doh
+		s.mu.Unlock()
+		if addrs, err = doh.Lookup(ctx, host); err != nil {
 			return nil, err
 		}
 	}
@@ -297,16 +423,58 @@ func (s *Slot) Dial(ctx context.Context, host string, port uint16) (net.Conn, er
 }
 
 func (s *Slot) dialIP(ctx context.Context, ap netip.AddrPort) (net.Conn, error) {
+	srv := s.server()
+	if srv == nil {
+		return nil, fmt.Errorf("%w: %s is stopped", ErrNotReady, s.name)
+	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	return s.srv.Dial(ctx, "tcp", ap.String())
+	return srv.Dial(ctx, "tcp", ap.String())
 }
 
 // dialTailnet dials a tailnet address; MagicDNS names are resolved by tsnet.
 func (s *Slot) dialTailnet(ctx context.Context, host string, port uint16) (net.Conn, error) {
+	srv := s.server()
+	if srv == nil {
+		return nil, fmt.Errorf("%w: %s is stopped", ErrNotReady, s.name)
+	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	return s.srv.Dial(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(int(port))))
+	return srv.Dial(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(int(port))))
+}
+
+// status of the node as reported by tsnet, for peer listing.
+func (s *Slot) tsStatus(ctx context.Context) (*ipnstate.Status, error) {
+	srv := s.server()
+	if srv == nil {
+		return nil, fmt.Errorf("%w: %s is stopped", ErrNotReady, s.name)
+	}
+	lc, err := srv.LocalClient()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return lc.Status(ctx)
+}
+
+// logout de-authorizes the node's key with the control server, best effort.
+func (s *Slot) logout(ctx context.Context) {
+	s.mu.Lock()
+	srv, started := s.srv, s.started
+	s.mu.Unlock()
+	if !started {
+		return
+	}
+	lc, err := srv.LocalClient()
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := lc.Logout(ctx); err != nil && !errors.Is(err, io.EOF) {
+		s.logf("egress %s: logout: %v", s.name, err)
+	}
 }
 
 // checkHealth fetches url through the exit node and records the result.

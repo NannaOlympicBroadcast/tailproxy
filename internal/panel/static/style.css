@@ -124,3 +124,12 @@ body.locked nav, body.locked .tab, body.locked #logout { display: none; }
 .state.error { color: var(--err-text); background: var(--err-bg); border-color: transparent; }
 .conn-error { color: var(--err-text); word-break: break-word; }
 a { color: var(--accent); }
+.banner.ok { background: color-mix(in srgb, var(--ok) 14%, var(--surface)); color: var(--ok); }
+a.button { display: inline-block; padding: 7px 14px; border-radius: 6px; background: var(--accent); color: var(--accent-text); text-decoration: none; }
+label.inline { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; white-space: nowrap; }
+.row.compact input { flex: 1 1 120px; }
+.authkey { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
+.authkey summary { cursor: pointer; }
+.authkey .row { margin: 8px 0; }
+#egress-list td:last-child { white-space: nowrap; }
+#egress-list td:last-child select { max-width: 200px; margin-right: 6px; }

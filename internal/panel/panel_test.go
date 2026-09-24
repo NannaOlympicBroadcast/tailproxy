@@ -1,13 +1,17 @@
 package panel
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/NannaOlympicBroadcast/tailproxy/internal/config"
 )
 
 const testConfig = `
@@ -340,5 +344,115 @@ func TestRuleTestWithDraft(t *testing.T) {
 	}
 	if rec := do(t, h, "POST", "/api/v1/rules/test", `{"domain":"a","rules":[{"domain":["a"],"egress":"nope"}]}`, nil); rec.Code != 400 {
 		t.Fatalf("invalid draft: %d", rec.Code)
+	}
+}
+
+// testRuntime is a test double for the running proxy: it records what the
+// panel asks it to do.
+type testRuntime struct {
+	applied []*config.Config
+	key     string
+	peers   any
+}
+
+func (r *testRuntime) Components() []Component { return nil }
+func (r *testRuntime) Egress() any             { return []any{} }
+func (r *testRuntime) Connections() any        { return map[string]any{} }
+func (r *testRuntime) Tailnet(context.Context) (any, any, error) {
+	return map[string]any{"main": map[string]string{"state": "ready"}, "auto_login": r.key != ""}, r.peers, nil
+}
+func (r *testRuntime) ApplyEgress(c *config.Config) error {
+	r.applied = append(r.applied, c)
+	return nil
+}
+func (r *testRuntime) SetAuthKey(k string) error {
+	if !strings.HasPrefix(k, "tskey-") {
+		return errors.New("bad key")
+	}
+	r.key = k
+	return nil
+}
+func (r *testRuntime) ClearAuthKey() error { r.key = ""; return nil }
+
+func egressRevision(t *testing.T, h http.Handler) string {
+	t.Helper()
+	var r struct{ Revision string }
+	rec := do(t, h, "GET", "/api/v1/egress", "", nil)
+	if err := json.Unmarshal(rec.Body.Bytes(), &r); err != nil || r.Revision == "" {
+		t.Fatalf("egress: %d %s", rec.Code, rec.Body.String())
+	}
+	return r.Revision
+}
+
+func TestSaveEgressAppliesAndWrites(t *testing.T) {
+	s, path := newTestServer(t, "# top\n"+testConfig)
+	rt := &testRuntime{}
+	s.SetRuntime(rt)
+	h := authed(s)
+	rev := egressRevision(t, h)
+	body := `{"revision":"` + rev + `","egress":[{"name":"us","exit_node":"ser647557941975"},{"name":"jp","exit_node":"tokyo-vps"},{"name":"cn","exit_node":"VM-0-5-opencloudos"}]}`
+	rec := do(t, h, "PUT", "/api/v1/egress", body, jsonHdr)
+	if rec.Code != 200 {
+		t.Fatalf("save: %d %s", rec.Code, rec.Body.String())
+	}
+	data, _ := os.ReadFile(path)
+	for _, want := range []string{"# top", "- {name: cn, exit_node: VM-0-5-opencloudos}", "- {domain_keyword: [openai], egress: us}"} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("file lacks %q:\n%s", want, data)
+		}
+	}
+	if len(rt.applied) != 1 || len(rt.applied[0].Egress) != 3 {
+		t.Fatalf("runtime not updated: %+v", rt.applied)
+	}
+
+	// Removing an egress that rules still use fails validation; nothing changes.
+	rev = egressRevision(t, h)
+	rec = do(t, h, "PUT", "/api/v1/egress", `{"revision":"`+rev+`","egress":[{"name":"us","exit_node":"x"}]}`, jsonHdr)
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), `unknown target \"jp\"`) {
+		t.Fatalf("remove referenced egress: %d %s", rec.Code, rec.Body.String())
+	}
+	if len(rt.applied) != 1 {
+		t.Fatal("failed save must not touch the runtime")
+	}
+	if rec := do(t, h, "PUT", "/api/v1/egress", `{"revision":"stale","egress":[]}`, jsonHdr); rec.Code != 409 {
+		t.Fatalf("stale revision: %d", rec.Code)
+	}
+}
+
+func TestTailnetAndAuthKeyEndpoints(t *testing.T) {
+	s, _ := newTestServer(t, testConfig)
+	rt := &testRuntime{peers: []map[string]any{{"name": "ser647557941975", "online": true, "exit_node_option": true}}}
+	s.SetRuntime(rt)
+	h := authed(s)
+	rec := do(t, h, "GET", "/api/v1/tailnet", "", nil)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "ser647557941975") {
+		t.Fatalf("tailnet: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := do(t, h, "PUT", "/api/v1/tailnet/authkey", `{"auth_key":"nope"}`, jsonHdr); rec.Code != 400 {
+		t.Fatalf("bad key: %d", rec.Code)
+	}
+	if rec := do(t, h, "PUT", "/api/v1/tailnet/authkey", `{"auth_key":"tskey-auth-k1-abc"}`, jsonHdr); rec.Code != 200 || rt.key != "tskey-auth-k1-abc" {
+		t.Fatalf("set key: %d %q", rec.Code, rt.key)
+	}
+	if rec := do(t, h, "DELETE", "/api/v1/tailnet/authkey", "", nil); rec.Code != 200 || rt.key != "" {
+		t.Fatalf("clear key: %d %q", rec.Code, rt.key)
+	}
+	if rec := do(t, s.Handler(), "GET", "/api/v1/tailnet", "", nil); rec.Code != 401 {
+		t.Fatalf("tailnet without token: %d", rec.Code)
+	}
+}
+
+func TestReloadAppliesEgress(t *testing.T) {
+	s, path := newTestServer(t, testConfig)
+	rt := &testRuntime{}
+	s.SetRuntime(rt)
+	h := authed(s)
+	os.WriteFile(path, []byte(strings.Replace(testConfig, "tokyo-vps", "osaka-vps", 1)), 0o600)
+	rec := do(t, h, "POST", "/api/v1/config/reload", "", nil)
+	if rec.Code != 200 || len(rt.applied) != 1 || rt.applied[0].Egress[1].ExitNode != "osaka-vps" {
+		t.Fatalf("reload: %d %s applied=%d", rec.Code, rec.Body.String(), len(rt.applied))
+	}
+	if strings.Contains(rec.Body.String(), "重启") {
+		t.Fatalf("egress changes must not ask for a restart: %s", rec.Body.String())
 	}
 }

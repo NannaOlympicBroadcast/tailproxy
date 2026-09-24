@@ -135,24 +135,202 @@ function safeHttpsLink(url, text) {
   return a;
 }
 
+/* ---------- 出口页：账号、设备、出口 ---------- */
+
+let egressState = { configured: [], runtime: [], revision: "" };
+let tailnetState = { account: null, peers: null };
+let addingFor = null; // peer id whose "添加为出口" form is open
+
+function egressMsg(text, kind) {
+  const b = $("egress-msg");
+  b.replaceChildren();
+  if (!text) { b.hidden = true; return; }
+  if (Array.isArray(text)) {
+    b.append(el("strong", kind === "error" ? "保存失败" : ""), errorList(text));
+  } else {
+    b.textContent = text;
+  }
+  b.className = "banner " + (kind === "error" ? "error" : kind === "ok" ? "ok" : "warn");
+  b.hidden = false;
+}
+
+function fmtAgo(iso) {
+  const sec = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (sec < 90) return "刚刚";
+  if (sec < 3600) return Math.round(sec / 60) + " 分钟前";
+  if (sec < 86400 * 2) return Math.round(sec / 3600) + " 小时前";
+  return Math.round(sec / 86400) + " 天前";
+}
+
 async function loadEgress() {
-  const e = await api("/api/v1/egress");
+  const [e, t] = await Promise.all([
+    api("/api/v1/egress"),
+    api("/api/v1/tailnet").catch((err) => { if (err instanceof AuthError) throw err; return { error: err.message }; }),
+  ]);
+  egressState = e;
+  tailnetState = t;
   $("egress-detail").textContent = e.detail || "";
   $("egress-detail").hidden = !e.detail;
-  renderExitNodes(e);
+  renderAccount();
+  if (addingFor === null) renderPeers();
+  renderEgressList();
+}
+
+function renderAccount() {
+  const t = tailnetState;
+  const body = $("account-body");
+  body.replaceChildren();
+  $("account-state").replaceChildren();
+  if (t.error || !t.account) {
+    body.append(el("p", "代理未运行，无法读取 Tailscale 状态" + (t.error ? "：" + t.error : ""), "muted"));
+    $("authkey-box").hidden = true;
+    return;
+  }
+  $("authkey-box").hidden = false;
+  const a = t.account, m = a.main;
+  $("account-state").append(stateBadge(m.state));
+  if (m.state === "ready") {
+    const p = el("p");
+    p.append(el("span", "已登录 "), el("strong", m.login_name || "（未知账号）"));
+    if (m.tailnet) p.append(el("span", " · tailnet " + m.tailnet));
+    body.append(p);
+    body.append(el("p", `主节点 ${m.hostname}${m.tailscale_ips && m.tailscale_ips.length ? "（" + m.tailscale_ips[0] + "）" : ""}：用于读取设备列表和访问 tailnet 内部，不使用出口节点。`, "muted"));
+  } else if (m.state === "needs_login") {
+    body.append(el("p", "只需登录一次：登录后自动读取你账号下的所有设备，之后在下方直接选择出口节点。"));
+    if (m.auth_url) {
+      const btn = safeHttpsLink(m.auth_url, "登录 Tailscale");
+      btn.className = "button";
+      body.append(btn);
+    }
+    if (a.auto_login) body.append(el("p", "已保存 auth key，主节点会自动登录，请稍候。", "muted"));
+  } else {
+    body.append(el("p", m.detail || "主节点状态：" + m.state, "muted"));
+  }
+
+  const st = $("authkey-status");
+  const clear = $("authkey-clear");
+  const input = $("authkey-input");
+  const submit = $("authkey-form").querySelector("button[type=submit]");
+  if (a.auth_key_source && a.auth_key_source.startsWith("env:")) {
+    st.textContent = `来自环境变量 $${a.auth_key_source.slice(4)}（${a.auth_key_hint || ""}），新增出口会自动加入`;
+    input.disabled = submit.disabled = clear.disabled = true;
+  } else if (a.auth_key_source === "file") {
+    st.textContent = `已保存（${a.auth_key_hint}），新增出口会自动加入`;
+    input.disabled = submit.disabled = false;
+    clear.disabled = false;
+  } else {
+    st.textContent = "未设置，新增出口需要各自点一次授权链接";
+    input.disabled = submit.disabled = false;
+    clear.disabled = true;
+  }
+  const link = $("authkey-link");
+  if (/^https:\/\//.test(a.keys_url || "")) link.href = a.keys_url;
+}
+
+function suggestName(p) {
+  let n = (p.hostname || p.name || "exit").toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24) || "exit";
+  const used = new Set(egressState.configured.map((e) => e.name));
+  let cand = n, i = 2;
+  while (used.has(cand)) cand = `${n}-${i++}`.slice(0, 40);
+  return cand;
+}
+
+function renderPeers() {
+  const tb = $("peer-list");
+  tb.replaceChildren();
+  const msg = (text) => { const tr = el("tr"); const td = el("td", text, "muted"); td.colSpan = 6; tr.append(td); tb.append(tr); };
+  const t = tailnetState;
+  if (t.error) return msg("读取失败：" + t.error);
+  if (t.peers_error) return msg("读取设备失败：" + t.peers_error);
+  if (!t.peers) return msg("登录 Tailscale 后，这里会列出你账号下的设备");
+  const onlyOnline = $("peers-online").checked;
+  const list = t.peers.filter((p) => !onlyOnline || p.online);
+  if (!list.length) return msg(onlyOnline ? "没有在线的设备（取消「只看在线」可以查看全部）" : "tailnet 中没有其他设备");
+  for (const p of list) {
+    const tr = el("tr");
+    const dev = el("td");
+    dev.append(el("div", p.name));
+    const sub = [p.hostname !== p.name ? p.hostname : "", p.owner, (p.tags || []).join(" ")].filter(Boolean).join(" · ");
+    if (sub) dev.append(el("div", sub, "muted"));
+    tr.append(dev);
+    tr.append(el("td", (p.tailscale_ips || [])[0] || ""));
+    tr.append(el("td", [p.os, p.country].filter(Boolean).join(" / ") || "—"));
+    const on = el("td");
+    on.append(el("span", p.online ? "在线" : "离线", "state " + (p.online ? "ready" : "stopped")));
+    if (!p.online && p.last_seen) on.append(el("div", "最后在线 " + fmtAgo(p.last_seen), "muted"));
+    tr.append(on);
+    const ex = el("td");
+    if (p.exit_node_option) ex.append(el("span", "已批准", "state ready"));
+    else {
+      const s = el("span", "未开启", "muted");
+      s.title = "在该设备上执行 tailscale set --advertise-exit-node，并在管理后台批准（Edit route settings → Use as exit node）";
+      ex.append(s);
+    }
+    tr.append(ex);
+    tr.append(peerActions(p));
+    tb.append(tr);
+  }
+}
+
+function peerActions(p) {
+  const td = el("td");
+  if (p.tailproxy) {
+    td.append(el("span", p.tailproxy === "main" ? "tailproxy 主节点" : `tailproxy 出口 ${p.tailproxy} 的设备`, "muted"));
+    return td;
+  }
+  if (p.used_by && p.used_by.length) {
+    td.append(el("span", "已作为出口：" + p.used_by.join(", ")));
+    return td;
+  }
+  if (!p.exit_node_option) {
+    td.append(el("span", "—", "muted"));
+    return td;
+  }
+  if (addingFor !== p.id) {
+    const b = el("button", "添加为出口", "secondary");
+    b.type = "button";
+    b.addEventListener("click", () => { addingFor = p.id; renderPeers(); });
+    td.append(b);
+    return td;
+  }
+  const form = el("form", null, "row compact");
+  const name = el("input");
+  name.value = suggestName(p);
+  name.setAttribute("aria-label", "出口名称");
+  name.title = "出口名称：小写字母、数字和 -，会用在规则里和设备名 tailproxy-<名称>";
+  const ok = el("button", "添加");
+  ok.type = "submit";
+  const cancel = el("button", "取消", "secondary");
+  cancel.type = "button";
+  cancel.addEventListener("click", () => { addingFor = null; renderPeers(); });
+  form.append(name, ok, cancel);
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const list = egressState.configured.slice();
+    list.push({ name: name.value.trim(), exit_node: p.hostname || p.name });
+    if (await saveEgress(list, `已添加出口 ${name.value.trim()} → ${p.name}`)) addingFor = null;
+  });
+  td.append(form);
+  setTimeout(() => name.focus(), 0);
+  return td;
+}
+
+function renderEgressList() {
+  const e = egressState;
   const rt = {};
   for (const r of e.runtime || []) rt[r.name] = r;
   const tb = $("egress-list");
   tb.replaceChildren();
   if (!e.configured || e.configured.length === 0) {
-    const tr = el("tr"); const td = el("td", "配置中没有出口", "muted"); td.colSpan = 5; tr.append(td); tb.append(tr);
+    const tr = el("tr"); const td = el("td", "还没有出口。登录后在上面的设备列表里点「添加为出口」。", "muted"); td.colSpan = 6; tr.append(td); tb.append(tr);
     return;
   }
-  for (const x of e.configured) {
+  const exitPeers = (tailnetState.peers || []).filter((p) => p.exit_node_option && !p.tailproxy);
+  e.configured.forEach((x, idx) => {
     const r = rt[x.name];
     const tr = el("tr");
     tr.append(el("td", x.name));
-    tr.append(el("td", x.type ? (x.type === "fallback" ? "组：故障转移" : "组：延迟优选") : "槽位"));
+    tr.append(el("td", x.type ? (x.type === "fallback" ? "组：故障转移" : "组：延迟优选") : "出口"));
     const target = el("td");
     if (x.type) {
       target.append(el("div", (x.members || []).join(", ")));
@@ -169,42 +347,93 @@ async function loadEgress() {
     if (r && r.detail) st.append(el("div", r.detail, "muted"));
     if (r && r.auth_url) {
       const d = el("div");
-      d.append(safeHttpsLink(r.auth_url, "打开 Tailscale 登录链接"));
+      d.append(safeHttpsLink(r.auth_url, "授权这台设备"));
       st.append(d);
     }
     tr.append(st);
     const info = el("td", null, "muted");
     if (r && r.hostname) info.append(el("div", r.hostname));
-    if (r && r.tailscale_ips && r.tailscale_ips.length) info.append(el("div", r.tailscale_ips.join(" ")));
-    if (r && r.health) {
-      const h = r.health;
-      info.append(el("div", h.ok ? `健康 ✓ ${h.rtt_ms.toFixed(0)} ms` : `健康 ✗ ${h.error || ""}`));
-    }
+    if (r && r.tailscale_ips && r.tailscale_ips.length) info.append(el("div", r.tailscale_ips[0]));
+    if (r && r.health) info.append(el("div", r.health.ok ? `健康 ✓ ${r.health.rtt_ms.toFixed(0)} ms` : `健康 ✗ ${r.health.error || ""}`));
     tr.append(info);
+
+    const act = el("td");
+    if (!x.type) {
+      const sel = el("select");
+      sel.setAttribute("aria-label", `出口 ${x.name} 使用的节点`);
+      const cur = new Option(`${x.exit_node}（当前）`, x.exit_node);
+      sel.append(cur);
+      for (const p of exitPeers) {
+        const v = p.hostname || p.name;
+        if (v !== x.exit_node) sel.append(new Option(`${p.name}${p.online ? "" : "（离线）"}`, v));
+      }
+      sel.disabled = sel.options.length < 2;
+      sel.title = sel.disabled ? "登录后可以从 tailnet 的出口节点里选择" : "更换出口节点";
+      sel.addEventListener("change", async () => {
+        const list = egressState.configured.map((y, j) => (j === idx ? Object.assign({}, y, { exit_node: sel.value }) : y));
+        await saveEgress(list, `出口 ${x.name} 已切换到 ${sel.value}`);
+      });
+      act.append(sel);
+    }
+    const del = el("button", "删除", "danger icon");
+    del.type = "button";
+    del.addEventListener("click", async () => {
+      if (!confirm(`删除出口 ${x.name}？\n${x.type ? "" : `它对应的设备 tailproxy-${x.name} 会从 tailnet 注销，本地状态也会删除。\n`}仍在使用它的规则或出口组需要先改掉，否则保存会失败。`)) return;
+      await saveEgress(egressState.configured.filter((_, j) => j !== idx), `已删除出口 ${x.name}`);
+    });
+    act.append(del);
+    tr.append(act);
     tb.append(tr);
+  });
+}
+
+async function saveEgress(list, okText) {
+  egressMsg("保存中…");
+  try {
+    const r = await api("/api/v1/egress", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ revision: egressState.revision, egress: list }),
+    });
+    await Promise.all([loadEgress(), loadRules(), loadConfig()]);
+    egressMsg(r.warning || okText, r.warning ? "warn" : "ok");
+    return true;
+  } catch (err) {
+    if (err instanceof AuthError) { authFailed(); return false; }
+    egressMsg(err.details || err.message, "error");
+    if (err.status === 409) await loadEgress().catch(() => {});
+    return false;
   }
 }
 
-function renderExitNodes(e) {
-  const tb = $("exit-nodes");
-  tb.replaceChildren();
-  const msg = (text) => { const tr = el("tr"); const td = el("td", text, "muted"); td.colSpan = 5; tr.append(td); tb.append(tr); };
-  if (e.exit_nodes_error) return msg("读取失败：" + e.exit_nodes_error);
-  if (!e.exit_nodes) return msg("还没有槽位登录到 tailnet，登录后这里会列出可用的出口节点");
-  if (!e.exit_nodes.length) return msg("tailnet 中没有已批准的出口节点（需要 --advertise-exit-node 并在管理后台批准）");
-  for (const n of e.exit_nodes) {
-    const tr = el("tr");
-    const name = el("td");
-    name.append(el("div", n.name));
-    if (n.hostname && n.hostname !== n.name) name.append(el("div", n.hostname, "muted"));
-    tr.append(name);
-    tr.append(el("td", (n.tailscale_ips || []).join(" ")));
-    tr.append(el("td", [n.os, n.country].filter(Boolean).join(" / ") || "—"));
-    const on = el("td"); on.append(el("span", n.online ? "在线" : "离线", "state " + (n.online ? "ready" : "exit_node_offline"))); tr.append(on);
-    tr.append(el("td", (n.used_by || []).join(", ") || "—"));
-    tb.append(tr);
+$("peers-online").addEventListener("change", renderPeers);
+
+$("authkey-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const key = $("authkey-input").value.trim();
+  if (!key) return;
+  try {
+    await api("/api/v1/tailnet/authkey", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ auth_key: key }) });
+    $("authkey-input").value = "";
+    egressMsg("auth key 已保存：正在等待登录的节点会用它自动登录，新增出口会自动加入", "ok");
+    await loadEgress();
+  } catch (err) {
+    if (err instanceof AuthError) { authFailed(); return; }
+    egressMsg("保存 auth key 失败：" + err.message, "error");
   }
-}
+});
+
+$("authkey-clear").addEventListener("click", async () => {
+  if (!confirm("删除已保存的 auth key？已登录的设备不受影响，之后新增的出口需要各自点授权链接。")) return;
+  try {
+    await api("/api/v1/tailnet/authkey", { method: "DELETE" });
+    egressMsg("已删除保存的 auth key", "ok");
+    await loadEgress();
+  } catch (err) {
+    if (err instanceof AuthError) { authFailed(); return; }
+    egressMsg("删除失败：" + err.message, "error");
+  }
+});
 
 function fmtBytes(n) {
   if (n < 1024) return n + " B";
