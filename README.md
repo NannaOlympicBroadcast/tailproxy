@@ -12,9 +12,9 @@
 | 规则引擎（`internal/rule`，首条命中；keyword / suffix / domain / ip_cidr / port） | 已实现 |
 | Web 面板 + REST API + `/metrics`（`internal/panel`，端口 7708） | 已实现 |
 | 命令行 start / stop / status / token、systemd 开机自启 | 已实现 |
-| 出口管理器（`internal/egress`）：每个出口一个内嵌 tsnet 节点、固定出口节点、经出口的 DoH 解析、故障转移 / 延迟优选组与健康检查 | 已实现；**尚未用真实出口节点做端到端验证**（见下文） |
+| 出口管理器（`internal/egress`）：每个出口一个内嵌 tsnet 节点、固定出口节点、经出口的 DoH 解析、故障转移 / 延迟优选组与健康检查 | 已实现；出口节点出口已在真实 tailnet 上验证（见下文），出口组尚未在真实环境验证 |
 | SOCKS5 入口（`internal/proxy`，仅 CONNECT、仅回环地址）+ 连接追踪 | 已实现 |
-| 中继出口（`tailproxy relay` + `internal/relay`）：客户端只用一台 tailnet 设备就能有多个出口 | 已实现；本机回环端到端验证通过，**尚未在真实 VPS 上验证** |
+| 中继出口（`tailproxy relay` + `internal/relay`）：客户端只用一台 tailnet 设备就能有多个出口 | 已实现；已在真实 tailnet（中国 + 美国 VPS）上端到端验证 |
 | 透明捕获（TUN / TPROXY）、FakeIP DNS、SNI 嗅探、UDP | 未实现 |
 
 ## 启动与管理
@@ -162,7 +162,7 @@ curl --socks5-hostname 127.0.0.1:1080 https://example.com/
   - SOCKS5 → `direct` 能正常访问；
   - 命中未就绪出口的连接会被拒绝，不会泄漏到本地网络；
   - DoH 客户端能从 Cloudflare 的真实解析器取得正确结果。
-- **没有验证**：流量真正经由出口节点发出。这需要一个已登录的 tailnet 和已批准的出口节点，开发环境里没有。第一次使用时，建议通过两个出口分别访问 IP 回显服务（例如 `curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me`，并为它写好对应规则），确认返回的是出口节点的公网 IP。
+- 已在真实 tailnet 上验证（2026-09-24）：从中国 VPS 经出口节点（美国 VPS）访问 `ifconfig.me`，返回美国 VPS 的公网 IP，空闲 90 秒后仍然正常，详见下文「中继出口」一节的验证表。
 
 ### 中继出口：一台设备，多个出口
 
@@ -203,7 +203,19 @@ egress:
 - 更换令牌：在 VPS 上执行 `tailproxy relay token --rotate` 和 `systemctl restart tailproxy-relay`，再在客户端面板点「更新令牌」。
 - 卸载：`sudo tailproxy service uninstall --relay`。
 
-**验证情况**：已在本机回环地址上跑通完整链路（relay → 客户端中继出口 → SOCKS5 → 本地 HTTP 源站，包括令牌错误和缺少令牌的情况）。还没有在真实 VPS 上验证。建议先用 `curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me` 配合对应规则，确认返回的是 VPS 的公网 IP。
+**验证情况**（2026-09-24，真实 tailnet）：客户端运行在中国 VPS 上，只登录了主节点一台设备（另有一台 `tailproxy-us` 用于对比出口节点方式）。
+
+| 出口 | 类型 | 经 SOCKS5 访问 IP 回显服务得到的公网 IP |
+|---|---|---|
+| 直连 | — | 106.52.30.242（中国 VPS 本机，广州） |
+| `cn` | 中继 → 中国 VPS | 106.52.30.242 |
+| `us` | 出口节点 → 美国 VPS | 186.244.245.39（洛杉矶） |
+| `usr` | 中继 → 美国 VPS | 186.244.245.39 |
+
+- 186.244.245.39 就是美国 VPS 的 WireGuard 端点地址（`tailscale ping` 输出 `via 186.244.245.39:41641`）。
+- 两台 VPS 都用 `tailproxy service install --relay` 装成 systemd 服务：只监听本机 Tailscale IP，从公网 IP 连 1081 会被拒绝；令牌不出现在 journal、客户端配置文件和客户端日志里。
+- 停掉美国的中继后，`usr` 变为「连不上中继」，连接直接失败（SOCKS 错误），**没有**改走本地网络；中继恢复后自动重新可用。
+- 这次测试发现并修复了一个出口节点方式的 bug：经出口节点的 DoH 解析可能只拿到 IPv6，或者在空闲后卡住（见提交 dde44c6）。
 
 **日志上传**：内嵌的 tsnet 与官方客户端一样，默认会把诊断日志上传到 `log.tailscale.com`。不希望上传时，启动前设置 `TS_NO_LOGS_NO_SUPPORT=true`（systemd 服务写进 `tailproxy.env`）。
 
