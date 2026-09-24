@@ -192,7 +192,30 @@
 - 做了证书固定（pinning）的 App 会直接断连；解密还会让 tailproxy 成为高价值攻击目标。〔无来源·设计决策〕
 - 业务上没有收益：规则只到域名这一级，不需要 URL 路径或报文内容。〔无来源·设计决策〕
 
-### 4.8 控制面与「插件」接口〔无来源·设计决策〕
+### 4.8 DoH / ECH 旁路对策
+
+**问题**：应用自己用 DoH/DoT 解析域名时，DNS 查询不经过 tailproxy，FakeIP 拿不到域名；如果连接同时使用了 ECH，SNI 也读不到真实域名，最后只能按 IP 规则匹配。
+
+**关键判断**：只要 DNS 查询回到 tailproxy，FakeIP 就能拿到域名，**不管连接是否使用 ECH**（4.2 中 FakeIP 优先于 ECH 外层 SNI）。所以对策的重心是**把 DNS 拉回来**，而不是对付 ECH 本身。另外，Firefox 的 ECH 必须在配置了 DoH 时才启用，并且遵守 canary、偏好设置和企业策略这些 DoH 退出机制 [来源 S34]，因此关掉 Firefox 的 DoH 也就同时关掉了它的 ECH。〔判断本身：无来源·设计决策〕
+
+分五层处理，前一层失效时由后一层兜底：
+
+| 层 | 措施 | 依据 | 默认 |
+|---|---|---|---|
+| L0 可观测 | 统计「域名未知」的连接、带 ECH 扩展且外层 SNI 与映射域名不一致的连接、命中 DoH/DoT 端点的连接；`tailproxy status --bypass` 输出按应用和目的地汇总的结果 | 〔无来源·设计决策〕：把「影响有多大」从未验证变成可以直接测量 | 开 |
+| L1 网络信号（零配置） | ① 让 `use-application-dns.net` 返回 NXDOMAIN；② tailproxy 自己作为系统 DNS | ① Firefox 解析 canary 域名得到 NXDOMAIN、其他错误码，或者 NOERROR 但没有 A/AAAA 记录时，就会关闭**默认开启的** DoH；但对用户手动开启的 DoH 无效 [来源 S35]。② Chrome 在未设置策略时，只会把 DoH 请求发给「与系统解析器相关联」的解析器 [来源 S36]，tailproxy 的本地解析器不属于这种情况〔无来源·待验证：本地地址不会被识别为已知 DoH 提供方〕 | 开 |
+| L2 封堵加密 DNS 通道 | ① DoH 端点：按域名列表（DNS 阶段直接返回 NXDOMAIN，SNI 阶段拒绝连接）和 IP 列表（只拦 443 端口）拦截，拒绝时回 TCP RST / ICMP 不可达，让客户端尽快回落；② DoT 的 TCP 853 和 DoQ 的 UDP 853 同样拒绝 | ① Chrome 的 automatic 模式遇到错误时「可能回落到非加密查询」，secure 模式则直接解析失败 [来源 S36]；Firefox 有 `Fallback` 策略控制是否回落到系统 DNS [来源 S37]；公开的 DoH 域名和 IP 列表每小时自动更新 [来源 S38]。② DoT 使用 TCP 853 端口 [来源 S39]，DoQ 使用 UDP 853 端口 [来源 S40] | 开，允许加白名单 |
+| L3 剥离 ECH 配置 | 删除 HTTPS/SVCB 应答中的 `ech` 参数，只在 `dns.mode: real` 时默认开启 | Chrome 在使用非加密 DNS 时也会查询 HTTPS（type 65）记录 [来源 S41]；ECH 配置通过 SVCB/HTTPS 记录下发，没有配置的客户端只发 GREASE ECH，外层 SNI 仍是真实域名 [来源 S30]；但客户端可能已经缓存了 ECH 配置 [来源 S42]。FakeIP 模式下有了域名就不需要 SNI，所以不必剥离〔无来源·设计决策〕 | real 模式开，FakeIP 模式关 |
+| L4 域名未知时兜底 | ① 规则域名预解析：对 `domain` / `domain_suffix` 中明确列出的主机名，通过对应出口定期解析，把得到的 IP 放进带 TTL 的动态 IP 集合，同时从所有经过的 DNS 应答中学习；② 可选规则 `outer_sni`：按 ECH 外层 SNI（如 CDN 公共名）粗粒度分流；③ `unknown_domain` 策略：默认只按 IP 规则匹配，也可以指定出口或拒绝 | ① 与 App Connector 用 DoH 解析域名再通告 IP 是同一思路，也有同样的共享 IP 误伤问题 [来源 S3]；`domain_keyword` 无法预解析〔无来源·设计决策〕 | ① 开；②③ 按需配置 |
+| L5 托管模式（需用户明确执行） | `tailproxy doctor --apply-browser-policy`：写入 Chrome/Edge 的 `DnsOverHttpsMode=off`（可选 `EncryptedClientHelloEnabled=false`），以及 Firefox 的 `DNSOverHTTPS {Enabled:false, Locked:true}`；执行前打印即将写入的内容，并支持一键撤销 | Chrome 的 `DnsOverHttpsMode` 取 `off` 时关闭 DoH [来源 S36]；`EncryptedClientHelloEnabled` 设为 false 时 Chrome 不启用 ECH [来源 S43]；Firefox `DNSOverHTTPS` 策略支持 `Enabled` / `Locked` / `Fallback` [来源 S37] | 关 |
+
+**剩余风险**：应用把 DoH 服务器的 IP 写死在代码里（不在公开列表中），同时连接又使用了 ECH，这种情况在不解密的前提下无法识别域名，只能按 IP 规则或 `unknown_domain` 策略处理；影响范围由 L0 统计给出。〔无来源·设计决策〕
+
+**Android 注意**：Chrome 策略文档写明，Android 9 及以上系统启用 DNS-over-TLS（私人 DNS）时，Chrome 不会发送非加密 DNS 请求 [来源 S36]。私人 DNS 在 VpnService 下的实际行为，以及 L2 封堵 853 端口后是否会回落，〔无来源·待验证〕，列入 M3 测试矩阵。
+
+**验证计划（M1 必做）**：Chrome / Edge / Firefox / Safari × DoH 设置（默认 / automatic / secure / 手动指定提供方）× 目标站点是否启用 ECH，逐项记录 L0 统计中的「域名未知率」。〔无来源·设计决策〕
+
+### 4.9 控制面与「插件」接口〔无来源·设计决策〕
 
 - **配置文件**：YAML，支持热重载（规则和出口组可以热更新；槽位增删会触发对应 tsnet 节点的启停）。
 - **本地 API**：Unix socket 或 Windows 命名管道提供 REST 接口，用于查询连接列表、命中规则、槽位状态，以及临时切换出口。
@@ -226,6 +249,18 @@ dns:
   fakeip: { inet4: 198.18.0.0/15, inet6: fc00::/18 }
   per_egress_doh: https://1.1.1.1/dns-query
   direct_upstream: system
+  anti_bypass:                      # 见 4.8
+    canary: true                    # use-application-dns.net → NXDOMAIN
+    block_doh: true                 # 公开 DoH 域名 / IP 列表，定时更新
+    doh_lists:
+      - https://raw.githubusercontent.com/dibdot/DoH-IP-blocklists/master/doh-domains.txt
+      - https://raw.githubusercontent.com/dibdot/DoH-IP-blocklists/master/doh-ipv4.txt
+      - https://raw.githubusercontent.com/dibdot/DoH-IP-blocklists/master/doh-ipv6.txt
+    doh_allow: []                   # 白名单
+    block_dot_doq: true             # TCP/UDP 853
+    strip_ech: auto                 # auto = 仅 real 模式开启
+    learn_rule_ips: true            # 规则域名预解析 + 应答学习
+  unknown_domain: ip_rules_only     # ip_rules_only | egress:<name> | reject
 
 capture:
   mode: auto                        # auto | tun | tproxy | socks
@@ -277,10 +312,10 @@ rules:
 | R1 | 上游 tsnet 没有底层拨号器注入点，桌面 TUN 模式下可能出现回环 | 〔无来源·待验证〕；sing-box 通过 fork 解决 [来源 S6] |
 | R2 | iOS Network Extension 内存上限与多个 tsnet 节点的开销 | 〔无来源·待验证〕 |
 | R3 | 每个槽位占用 1 个 tagged 配额 | 已知，Personal 套餐包含 50 个 [来源 S21] |
-| R4 | QUIC/ECH 普及后 SNI 嗅探失效，只能依赖 FakeIP | 〔无来源·待验证〕 |
+| R4 | QUIC/ECH 普及后 SNI 嗅探失效，只能依赖 FakeIP | 见 R7 与 4.8 |
 | R5 | Windows 上 TUN 默认路由与出口节点冲突 | sing-box 社区 fork 有相关报告 [来源 S26]，需要在 M2 回归测试 |
 | R6 | Apple 平台的审核与 API 约束：packet tunnel 不应用于选择性代理 | 已据 TN3120 调整 macOS / iOS 方案 [来源 S27] |
-| R7 | ECH 普及后 SNI 不可信；浏览器自带 DoH 时 FakeIP 也拿不到域名，此时只能按 IP 规则匹配 | 已在 4.7 定义优先级 [来源 S30]；DoH 旁路的影响范围〔无来源·待验证〕 |
+| R7 | ECH 普及后 SNI 不可信；浏览器自带 DoH 时 FakeIP 也拿不到域名 | 已有 L0–L5 分层对策（见 4.8）；剩余风险为写死 DoH IP 且同时使用 ECH 的应用，影响范围由 L0 统计给出 |
 
 ---
 
@@ -320,4 +355,14 @@ rules:
 | S31 | RFC 9460 §7.3 ipv4hint / ipv6hint：https://www.rfc-editor.org/rfc/rfc9460 |
 | S32 | Tailscale Docs – Enabling HTTPS：https://tailscale.com/kb/1153/enabling-https |
 | S33 | Android – Network security configuration：https://developer.android.com/privacy-and-security/security-config |
+| S34 | Mozilla dev-platform – Intent to experiment and ship: Encrypted Client Hello：https://groups.google.com/a/mozilla.org/g/dev-platform/c/uv7PNrHUagA |
+| S35 | Mozilla Support – Canary domain use-application-dns.net：https://support.mozilla.org/en-US/kb/canary-domain-use-application-dnsnet |
+| S36 | Chromium 策略定义 DnsOverHttpsMode：https://chromium.googlesource.com/chromium/src/+/main/components/policy/resources/templates/policy_definitions/Miscellaneous/DnsOverHttpsMode.yaml |
+| S37 | Mozilla policy-templates – DNSOverHTTPS：https://github.com/mozilla/policy-templates/blob/master/docs/index.md#dnsoverhttps |
+| S38 | dibdot/DoH-IP-blocklists：https://github.com/dibdot/DoH-IP-blocklists |
+| S39 | RFC 7858 DNS over TLS：https://www.rfc-editor.org/rfc/rfc7858 |
+| S40 | RFC 9250 DNS over Dedicated QUIC：https://www.rfc-editor.org/rfc/rfc9250 |
+| S41 | Chromium 策略定义 AdditionalDnsQueryTypesEnabled：https://chromium.googlesource.com/chromium/src/+/main/components/policy/resources/templates/policy_definitions/Miscellaneous/AdditionalDnsQueryTypesEnabled.yaml |
+| S42 | Zscaler – Encrypted Client Hello Is Here to Stay：https://www.zscaler.com/blogs/product-insights/encrypted-client-hello-ech-here-stay |
+| S43 | Chromium 策略定义 EncryptedClientHelloEnabled：https://chromium.googlesource.com/chromium/src/+/main/components/policy/resources/templates/policy_definitions/Miscellaneous/EncryptedClientHelloEnabled.yaml |
 | S27 | Apple TN3120 – Expected use cases for Network Extension packet tunnel providers：https://developer.apple.com/documentation/technotes/tn3120-expected-use-cases-for-network-extension-packet-tunnel-providers |
