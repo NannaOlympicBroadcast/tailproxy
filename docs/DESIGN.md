@@ -102,9 +102,9 @@
 |---|---|---|
 | Linux / OpenWrt | nftables TPROXY（可以拿到原始目的地址，不依赖 NAT）；TUN 作为备选 | TPROXY 依赖 `IP_TRANSPARENT` 套接字选项和 fwmark 策略路由，iptables 与 nftables 都支持 [来源 S10] |
 | Windows | Wintun TUN | Wintun 是 Windows 内核下的极简 TUN 驱动，最初为 WireGuard 开发；源码是 GPL-2.0，预编译的签名 DLL 使用更宽松的许可 [来源 S11] |
-| macOS | 以 root 守护进程运行 utun TUN（开发者版）；上架版本使用 `NEPacketTunnelProvider` | `NEPacketTunnelProvider` 通过 `packetFlow` 提供虚拟网卡，并能设置需要进入隧道和排除在隧道外的网段 [来源 S12]；`NETransparentProxyProvider` 按 flow 接管流量，但会忽略它自身设置里的 DNS 配置 [来源 S13]，因此不作为主方案〔无来源·设计决策〕 |
+| macOS | 签名/上架版本使用 `NETransparentProxyProvider`；开发者版可以用 root 守护进程运行 utun TUN | Apple TN3120 明确要求：不要用 packet tunnel provider「选择性接管流量、其余转发到别处」，macOS 上推荐的替代方案是 `NETransparentProxyProvider` [来源 S27]；在该 provider 中，对某个 flow 返回 `false`，这个 flow 就会直接连往目的地 [来源 S13]，正好对应「未命中规则 → 走系统默认路径」。该 provider 会忽略自身设置里的 DNS 配置 [来源 S13]，因此 macOS 上获取域名主要靠嗅探〔无来源·设计决策〕 |
 | Android | `VpnService` | 同一时间只能有一个 VPN 连接，新 VPN 建立时旧的会被停用 [来源 S14]；Tailscale 官方也说明 iOS/Android 同时只能运行一个 VPN [来源 S7] |
-| iOS | `NEPacketTunnelProvider` | 同上 [来源 S7][来源 S12] |
+| iOS | `NEPacketTunnelProvider`，只通过 `includedRoutes` 接管 FakeIP 地址池和 IP 规则中的网段（选择性路由模式，见 4.6） | TN3120 对 iOS 的建议是用 per-app VPN，或者用 `includedRoutes` 按目的 IP 接管流量 [来源 S27]；同一时间只能运行一个 VPN [来源 S7] |
 | 所有平台 | SOCKS5 / HTTP 本地代理入口 | 用于非透明场景、调试和 CI〔无来源·设计决策〕 |
 
 **与系统 Tailscale 客户端共存（桌面端）**
@@ -128,7 +128,7 @@
 
 ### 4.3 规则引擎〔无来源·设计决策〕
 
-- **语义**：按配置顺序**首条命中**，最后以 `final` 兜底。
+- **语义**：按配置顺序**首条命中**，最后以 `final` 兜底；配置中没有写 `final` 时，等同于 `final: direct`（见 4.6）。
 - **匹配数据结构**：
   - `domain_keyword`：把所有关键词编进一个 Aho-Corasick 自动机，匹配复杂度 O(|域名|)，与关键词数量无关。
   - `domain_suffix`：把域名按标签反转后放入 trie，例如 `com.openai`。`openai.com` 能命中 `api.openai.com`，但不会命中 `notopenai.com`。
@@ -156,7 +156,25 @@
 | 配额 | Personal 套餐包含 50 个 tagged 资源，ephemeral 资源为每月 1000 分钟；因此推荐**持久化状态的非 ephemeral tagged 节点**，每个槽位占 1 个 tagged 配额 | [来源 S21] |
 | 自建控制面 | tsnet 支持 `ControlURL`，理论上可以对接 Headscale | tsnet 字段见 [来源 S4]；Headscale 对出口节点的兼容性〔无来源·待验证〕 |
 
-### 4.6 控制面与「插件」接口〔无来源·设计决策〕
+### 4.6 未命中规则的流量（默认出站）
+
+**默认行为**：`final` 缺省为 `direct`，也就是由操作系统按**当前默认路由**把流量送出去。通常就是默认物理网卡，但如果默认路由指向别的 VPN，流量也会跟着走那个 VPN。〔无来源·设计决策〕
+
+未命中规则的流量有两种走法：
+
+| 走法 | 适用场景 | 机制 |
+|---|---|---|
+| **A. 根本不进入 tailproxy** | `capture.exclude_cidr` 中的网段；Linux 上 nft 不匹配的流量；iOS / 选择性路由模式下不在 `includedRoutes` 里的目的地 | 流量不经过任何代理代码，直接走系统路由表〔无来源·设计决策〕；iOS 以 `includedRoutes` 按目的 IP 接管的做法见 [来源 S27] |
+| **B. 被截获后，由 `direct` 出站重新拨号** | 需要先看到 SNI 才能判断规则的流量（全量 TUN / TPROXY 模式） | 重新拨号的套接字必须绕开自己的 TUN，否则会回环：Linux 打 `SO_MARK` 绕行标记，让它走 main 路由表 [来源 S15][来源 S16]；Android 调用 `VpnService.protect()`，受保护的套接字直接走底层网络，不经过 VPN [来源 S14]；macOS 透明代理对 flow 返回 `false`，让系统直连 [来源 S13]；Windows / macOS-utun 绑定物理网卡〔无来源·待验证〕 |
+
+**选择性路由模式（推荐的默认模式）**〔无来源·设计决策〕：DNS 模块只给**命中域名规则的域名**返回 FakeIP，其余域名返回真实 IP；TUN 或隧道只接管 FakeIP 地址池和 IP 规则中的网段。这样未命中的流量走的是 A 路径，完全不经过 tailproxy。代价有两个：域名规则只能在 DNS 阶段判定，拿不到 SNI 校验；应用如果自带 DoH，会绕过 DNS 规则。
+
+**注意事项**
+- 系统里的官方 Tailscale 客户端如果开启了出口节点，默认路由会指向 Tailscale，这时 `direct` 的流量实际上也会从那个出口节点出去 [来源 S1][来源 S7]。所以设计要求官方客户端不要开启出口节点。
+- **出口故障时不自动回落到 `direct`**：已经命中某个出口的流量，如果该出口不可用，默认直接拒绝，以免本该走出口的流量从本地网卡泄漏；用户可以用 `on_egress_down: direct` 显式开启回落。〔无来源·设计决策〕
+- 想要「未命中一律不出网」的用户，可以配置 `final: reject`。〔无来源·设计决策〕
+
+### 4.7 控制面与「插件」接口〔无来源·设计决策〕
 
 - **配置文件**：YAML，支持热重载（规则和出口组可以热更新；槽位增删会触发对应 tsnet 节点的启停）。
 - **本地 API**：Unix socket 或 Windows 命名管道提供 REST 接口，用于查询连接列表、命中规则、槽位状态，以及临时切换出口。
@@ -243,6 +261,7 @@ rules:
 | R3 | 每个槽位占用 1 个 tagged 配额 | 已知，Personal 套餐包含 50 个 [来源 S21] |
 | R4 | QUIC/ECH 普及后 SNI 嗅探失效，只能依赖 FakeIP | 〔无来源·待验证〕 |
 | R5 | Windows 上 TUN 默认路由与出口节点冲突 | sing-box 社区 fork 有相关报告 [来源 S26]，需要在 M2 回归测试 |
+| R6 | Apple 平台的审核与 API 约束：packet tunnel 不应用于选择性代理 | 已据 TN3120 调整 macOS / iOS 方案 [来源 S27] |
 
 ---
 
@@ -276,3 +295,4 @@ rules:
 | S24 | wireguard-go LICENSE（MIT）：https://github.com/WireGuard/wireguard-go/blob/master/LICENSE |
 | S25 | gVisor LICENSE（Apache-2.0）：https://github.com/google/gvisor/blob/master/LICENSE |
 | S26 | LIghtJUNction/sing-box#380（社区 fork 的 issue）：https://github.com/LIghtJUNction/sing-box/issues/380 |
+| S27 | Apple TN3120 – Expected use cases for Network Extension packet tunnel providers：https://developer.apple.com/documentation/technotes/tn3120-expected-use-cases-for-network-extension-packet-tunnel-providers |
