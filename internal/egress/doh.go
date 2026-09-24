@@ -29,6 +29,8 @@ const (
 type DoH struct {
 	url    string
 	client *http.Client
+	// Logf, if set, reports failed and retried queries.
+	Logf func(string, ...any)
 
 	mu    sync.Mutex
 	cache map[string]cacheEntry
@@ -47,8 +49,10 @@ func NewDoH(url string, client *http.Client) *DoH {
 	return &DoH{url: url, client: client, cache: map[string]cacheEntry{}}
 }
 
-// Lookup returns the IPv4 addresses of host, or its IPv6 addresses if it has
-// no IPv4 address. Exit nodes commonly lack IPv6, so IPv4 is preferred.
+// Lookup returns host's addresses, IPv4 first. A and AAAA are queried in
+// parallel; each query gets a short timeout and one retry on a fresh
+// connection, so a dead pooled connection costs seconds, not the caller's
+// whole deadline. A result is cached only when both queries answered.
 func (d *DoH) Lookup(ctx context.Context, host string) ([]netip.Addr, error) {
 	host = strings.TrimSuffix(strings.ToLower(host), ".")
 	d.mu.Lock()
@@ -58,26 +62,75 @@ func (d *DoH) Lookup(ctx context.Context, host string) ([]netip.Addr, error) {
 	}
 	d.mu.Unlock()
 
+	type result struct {
+		addrs []netip.Addr
+		ttl   time.Duration
+		err   error
+	}
+	var v4, v6 result
+	var wg sync.WaitGroup
+	for _, q := range []struct {
+		qt  dnsmessage.Type
+		out *result
+	}{{dnsmessage.TypeA, &v4}, {dnsmessage.TypeAAAA, &v6}} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			q.out.addrs, q.out.ttl, q.out.err = d.queryRetry(ctx, host, q.qt)
+		}()
+	}
+	wg.Wait()
+
+	addrs := append(append([]netip.Addr(nil), v4.addrs...), v6.addrs...)
 	var errs []error
-	for _, qt := range []dnsmessage.Type{dnsmessage.TypeA, dnsmessage.TypeAAAA} {
-		addrs, ttl, err := d.query(ctx, host, qt)
-		if err != nil {
-			errs = append(errs, err)
-			continue
+	for _, r := range []result{v4, v6} {
+		if r.err != nil {
+			errs = append(errs, r.err)
 		}
-		if len(addrs) > 0 {
-			ttl = min(max(ttl, minCacheTTL), maxCacheTTL)
-			d.mu.Lock()
-			d.cache[host] = cacheEntry{addrs: addrs, expires: time.Now().Add(ttl)}
-			d.mu.Unlock()
-			return addrs, nil
+	}
+	if len(addrs) == 0 {
+		if len(errs) > 0 {
+			return nil, fmt.Errorf("resolve %s via %s: %w", host, d.url, errors.Join(errs...))
 		}
+		return nil, fmt.Errorf("resolve %s via %s: no A or AAAA records", host, d.url)
 	}
 	if len(errs) > 0 {
-		return nil, fmt.Errorf("resolve %s via %s: %w", host, d.url, errors.Join(errs...))
+		if d.Logf != nil {
+			d.Logf("doh: %s via %s: partial answer: %v", host, d.url, errors.Join(errs...))
+		}
+		return addrs, nil // usable, but not cached
 	}
-	return nil, fmt.Errorf("resolve %s via %s: no A or AAAA records", host, d.url)
+	ttl := maxCacheTTL
+	for _, r := range []result{v4, v6} {
+		if len(r.addrs) > 0 {
+			ttl = min(ttl, r.ttl)
+		}
+	}
+	ttl = min(max(ttl, minCacheTTL), maxCacheTTL)
+	d.mu.Lock()
+	d.cache[host] = cacheEntry{addrs: addrs, expires: time.Now().Add(ttl)}
+	d.mu.Unlock()
+	return addrs, nil
 }
+
+// queryTimeout bounds one DoH round trip.
+const queryTimeout = 5 * time.Second
+
+// queryRetry runs query and, if it fails for a reason other than the answer
+// itself, drops pooled connections and tries once more.
+func (d *DoH) queryRetry(ctx context.Context, host string, qt dnsmessage.Type) ([]netip.Addr, time.Duration, error) {
+	addrs, ttl, err := d.query(ctx, host, qt)
+	if err == nil || ctx.Err() != nil || errors.Is(err, errNoSuchHost) {
+		return addrs, ttl, err
+	}
+	if d.Logf != nil {
+		d.Logf("doh: %s %v via %s: %v; retrying on a new connection", host, qt, d.url, err)
+	}
+	d.client.CloseIdleConnections()
+	return d.query(ctx, host, qt)
+}
+
+var errNoSuchHost = errors.New("no such host")
 
 func (d *DoH) query(ctx context.Context, host string, qt dnsmessage.Type) ([]netip.Addr, time.Duration, error) {
 	name, err := dnsmessage.NewName(host + ".")
@@ -93,7 +146,7 @@ func (d *DoH) query(ctx context.Context, host string, qt dnsmessage.Type) ([]net
 	if err != nil {
 		return nil, 0, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.url, bytes.NewReader(packed))
 	if err != nil {
@@ -118,7 +171,7 @@ func (d *DoH) query(ctx context.Context, host string, qt dnsmessage.Type) ([]net
 		return nil, 0, fmt.Errorf("DoH reply: %w", err)
 	}
 	if reply.RCode == dnsmessage.RCodeNameError {
-		return nil, 0, fmt.Errorf("%s: no such host", host)
+		return nil, 0, fmt.Errorf("%s: %w", host, errNoSuchHost)
 	}
 	if reply.RCode != dnsmessage.RCodeSuccess {
 		return nil, 0, fmt.Errorf("DoH rcode %v", reply.RCode)

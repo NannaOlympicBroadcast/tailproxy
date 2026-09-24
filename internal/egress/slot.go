@@ -110,7 +110,8 @@ func newSlot(name, hostname, spec, dir, dohURL string, main bool, newServer func
 }
 
 func (s *Slot) makeDoH(url string) *DoH {
-	return NewDoH(url, &http.Client{Transport: &http.Transport{
+	label := "egress " + s.name
+	d := NewDoH(url, &http.Client{Transport: &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			ap, err := netip.ParseAddrPort(addr)
 			if err != nil {
@@ -119,7 +120,16 @@ func (s *Slot) makeDoH(url string) *DoH {
 			return s.dialIP(ctx, ap)
 		},
 		ForceAttemptHTTP2: true,
+		// A pooled connection through an exit node can die silently
+		// (NAT timeout, exit node switch); don't keep idle ones long and
+		// let HTTP/2 pings detect dead ones.
+		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   queryTimeout,
+		ResponseHeaderTimeout: queryTimeout,
+		HTTP2:                 &http.HTTP2Config{SendPingTimeout: 15 * time.Second, PingTimeout: 5 * time.Second},
 	}})
+	d.Logf = func(format string, args ...any) { s.logf(label+": "+format, args...) }
+	return d
 }
 
 // start creates a fresh tsnet server and runs it until parent is cancelled

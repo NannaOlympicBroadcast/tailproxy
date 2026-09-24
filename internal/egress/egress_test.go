@@ -2,6 +2,7 @@ package egress
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"golang.org/x/net/dns/dnsmessage"
@@ -20,9 +22,9 @@ import (
 )
 
 // dohServer is a minimal RFC 8484 server answering from a fixed table.
-func dohServer(t *testing.T, a map[string]string, hits *int) *httptest.Server {
+func dohServer(t *testing.T, a map[string]string, hits *atomic.Int64) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		*hits++
+		hits.Add(1)
 		if r.Header.Get("Content-Type") != "application/dns-message" {
 			http.Error(w, "bad content type", 415)
 			return
@@ -36,12 +38,22 @@ func dohServer(t *testing.T, a map[string]string, hits *int) *httptest.Server {
 		qn := strings.TrimSuffix(q.Questions[0].Name.String(), ".")
 		resp := dnsmessage.Message{Header: dnsmessage.Header{Response: true, RCode: dnsmessage.RCodeSuccess}, Questions: q.Questions}
 		ip, ok := a[qn]
-		if !ok {
+		ip6, ok6 := a[qn+"/6"]
+		switch {
+		case !ok && !ok6:
 			resp.RCode = dnsmessage.RCodeNameError
-		} else if q.Questions[0].Type == dnsmessage.TypeA {
+		case q.Questions[0].Type == dnsmessage.TypeA && ip == "fail":
+			http.Error(w, "A broken", 502)
+			return
+		case q.Questions[0].Type == dnsmessage.TypeA && ok:
 			resp.Answers = []dnsmessage.Resource{{
 				Header: dnsmessage.ResourceHeader{Name: q.Questions[0].Name, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 60},
 				Body:   &dnsmessage.AResource{A: netip.MustParseAddr(ip).As4()},
+			}}
+		case q.Questions[0].Type == dnsmessage.TypeAAAA && ok6:
+			resp.Answers = []dnsmessage.Resource{{
+				Header: dnsmessage.ResourceHeader{Name: q.Questions[0].Name, Type: dnsmessage.TypeAAAA, Class: dnsmessage.ClassINET, TTL: 60},
+				Body:   &dnsmessage.AAAAResource{AAAA: netip.MustParseAddr(ip6).As16()},
 			}}
 		}
 		out, _ := resp.Pack()
@@ -51,7 +63,7 @@ func dohServer(t *testing.T, a map[string]string, hits *int) *httptest.Server {
 }
 
 func TestDoHLookupAndCache(t *testing.T) {
-	hits := 0
+	var hits atomic.Int64
 	srv := dohServer(t, map[string]string{"api.example.com": "203.0.113.7"}, &hits)
 	defer srv.Close()
 	d := NewDoH(srv.URL, srv.Client())
@@ -59,11 +71,43 @@ func TestDoHLookupAndCache(t *testing.T) {
 	if err != nil || len(addrs) != 1 || addrs[0].String() != "203.0.113.7" {
 		t.Fatalf("lookup: %v %v", addrs, err)
 	}
-	if _, err := d.Lookup(context.Background(), "api.example.com"); err != nil || hits != 1 {
-		t.Fatalf("second lookup should be cached: hits=%d err=%v", hits, err)
+	if _, err := d.Lookup(context.Background(), "api.example.com"); err != nil || hits.Load() != 2 {
+		t.Fatalf("second lookup should be cached (A + AAAA = 2 queries): hits=%d err=%v", hits.Load(), err)
 	}
 	if _, err := d.Lookup(context.Background(), "nx.example.com"); err == nil || !strings.Contains(err.Error(), "no such host") {
 		t.Fatalf("NXDOMAIN: %v", err)
+	}
+}
+
+// IPv4 comes first; when one family fails the answer is used but not
+// cached, and the failed query is retried once.
+func TestDoHOrderAndPartialFailure(t *testing.T) {
+	var hits atomic.Int64
+	srv := dohServer(t, map[string]string{
+		"dual.example": "203.0.113.8", "dual.example/6": "2001:db8::8",
+		"v6only.example": "fail", "v6only.example/6": "2001:db8::9",
+	}, &hits)
+	defer srv.Close()
+	d := NewDoH(srv.URL, srv.Client())
+	var logged []string
+	d.Logf = func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }
+	addrs, err := d.Lookup(context.Background(), "dual.example")
+	if err != nil || len(addrs) != 2 || !addrs[0].Is4() || !addrs[1].Is6() {
+		t.Fatalf("dual: %v %v", addrs, err)
+	}
+	hits.Store(0)
+	for i := 0; i < 2; i++ {
+		addrs, err = d.Lookup(context.Background(), "v6only.example")
+		if err != nil || len(addrs) != 1 || addrs[0].String() != "2001:db8::9" {
+			t.Fatalf("v6only: %v %v", addrs, err)
+		}
+	}
+	// per lookup: A, A retry, AAAA; nothing cached
+	if hits.Load() != 6 {
+		t.Fatalf("partial answer must not be cached and A must be retried once: hits=%d", hits.Load())
+	}
+	if len(logged) == 0 || !strings.Contains(strings.Join(logged, "\n"), "TypeA via") {
+		t.Fatalf("failed A query not logged: %q", logged)
 	}
 }
 
