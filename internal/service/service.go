@@ -21,7 +21,7 @@ type Paths struct {
 	Dir   string
 	State string // tailproxy.json: the running instance
 	Log   string // tailproxy.log: output of the background process
-	Token string // tailproxy.token: panel token, only with --save-token
+	Token string // tailproxy.token: persisted panel token (kept across restarts)
 }
 
 // DefaultDir returns ~/.lighthousepro.
@@ -57,7 +57,7 @@ type State struct {
 	URL       string    `json:"url"`
 	Config    string    `json:"config"`
 	Log       string    `json:"log,omitempty"`        // empty when running in the foreground
-	TokenFile string    `json:"token_file,omitempty"` // empty unless the token was saved
+	TokenFile string    `json:"token_file,omitempty"` // persisted token file; empty for env or one-off tokens
 	TokenEnv  string    `json:"token_env,omitempty"`
 	Started   time.Time `json:"started"`
 }
@@ -79,7 +79,7 @@ func (p Paths) ReadState() (*State, error) {
 }
 
 // Running returns the recorded instance if its process is still alive. A
-// stale state file (process gone) is removed together with its token file.
+// stale state file (process gone) is removed.
 func (p Paths) Running() (*State, error) {
 	st, err := p.ReadState()
 	if err != nil || st == nil {
@@ -101,26 +101,9 @@ func (p Paths) WriteState(st State) error {
 	return writeFile0600(p.State, append(data, '\n'))
 }
 
-// SaveToken writes the panel token with mode 0600.
-func (p Paths) SaveToken(token string) error {
-	return writeFile0600(p.Token, []byte(token+"\n"))
-}
-
-// ReadToken returns the saved panel token.
-func (p Paths) ReadToken() (string, error) {
-	data, err := os.ReadFile(p.Token)
-	if err != nil {
-		return "", err
-	}
-	tok := string(data)
-	for len(tok) > 0 && (tok[len(tok)-1] == '\n' || tok[len(tok)-1] == '\r') {
-		tok = tok[:len(tok)-1]
-	}
-	return tok, nil
-}
-
-// Cleanup removes the state and token files if they belong to pid (or to a
-// process that no longer exists). It never touches another live instance's files.
+// Cleanup removes the state file if it belongs to pid (or to a process that
+// no longer exists). It never touches another live instance's state. The
+// persisted token file is kept on purpose.
 func (p Paths) Cleanup(pid int) {
 	st, err := p.ReadState()
 	if err != nil || st == nil {
@@ -129,7 +112,6 @@ func (p Paths) Cleanup(pid int) {
 	if st.PID != pid && processAlive(st.PID) {
 		return
 	}
-	os.Remove(p.Token)
 	os.Remove(p.State)
 }
 
@@ -156,14 +138,15 @@ func writeFile0600(path string, data []byte) error {
 // Ready is what the background child reports to the launching command once
 // its panel is listening (or why it failed to get there).
 type Ready struct {
-	OK        bool   `json:"ok"`
-	Error     string `json:"error,omitempty"`
-	PID       int    `json:"pid,omitempty"`
-	URL       string `json:"url,omitempty"`
-	Listen    string `json:"listen,omitempty"`
-	LoginURL  string `json:"login_url,omitempty"`
-	Token     string `json:"token,omitempty"` // only for a generated token
-	TokenEnv  string `json:"token_env,omitempty"`
-	TokenFile string `json:"token_file,omitempty"`
-	Log       string `json:"log,omitempty"`
+	OK           bool   `json:"ok"`
+	Error        string `json:"error,omitempty"`
+	PID          int    `json:"pid,omitempty"`
+	URL          string `json:"url,omitempty"`
+	Listen       string `json:"listen,omitempty"`
+	LoginURL     string `json:"login_url,omitempty"`
+	Token        string `json:"token,omitempty"` // omitted when it comes from the environment
+	TokenEnv     string `json:"token_env,omitempty"`
+	TokenFile    string `json:"token_file,omitempty"`
+	TokenCreated bool   `json:"token_created,omitempty"`
+	Log          string `json:"log,omitempty"`
 }

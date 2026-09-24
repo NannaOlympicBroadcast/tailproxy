@@ -25,7 +25,7 @@ func newTestServer(t *testing.T, cfg string) (*Server, string) {
 	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s, err := New(path, "test")
+	s, err := New(path, "test", Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestShortEnvTokenRejected(t *testing.T) {
 	t.Setenv("TP_TEST_TOKEN", "short")
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	os.WriteFile(path, []byte("panel: {auth_token_env: TP_TEST_TOKEN}\n"), 0o600)
-	if _, err := New(path, "test"); err == nil || !strings.Contains(err.Error(), "shorter than") {
+	if _, err := New(path, "test", Options{}); err == nil || !strings.Contains(err.Error(), "shorter than") {
 		t.Fatalf("got %v", err)
 	}
 }

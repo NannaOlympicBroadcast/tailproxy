@@ -22,31 +22,27 @@ func TestStateAndTokenFiles(t *testing.T) {
 	if err := p.WriteState(want); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.SaveToken("tok-123"); err != nil {
+	if err := os.WriteFile(p.Token, []byte("tok-123\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, f := range []string{p.State, p.Token} {
-		if info, _ := os.Stat(f); info.Mode().Perm() != 0o600 {
-			t.Fatalf("%s mode %v", f, info.Mode().Perm())
-		}
+	if info, _ := os.Stat(p.State); info.Mode().Perm() != 0o600 {
+		t.Fatalf("state mode %v", info.Mode().Perm())
 	}
 	st, err := p.Running()
 	if err != nil || st == nil || st.PID != want.PID || !st.Started.Equal(want.Started) {
 		t.Fatalf("Running = %+v, %v", st, err)
 	}
-	if tok, err := p.ReadToken(); tok != "tok-123" || err != nil {
-		t.Fatalf("ReadToken = %q, %v", tok, err)
-	}
-	// Cleanup by another pid must not remove a live instance's files.
+	// Cleanup by another pid must not remove a live instance's state.
 	p.Cleanup(os.Getpid() + 1)
-	if _, err := os.Stat(p.Token); err != nil {
-		t.Fatal("cleanup by a different pid removed a live instance's token")
+	if _, err := os.Stat(p.State); err != nil {
+		t.Fatal("cleanup by a different pid removed a live instance's state")
 	}
 	p.Cleanup(os.Getpid())
-	for _, f := range []string{p.State, p.Token} {
-		if _, err := os.Stat(f); !os.IsNotExist(err) {
-			t.Fatalf("%s not removed", f)
-		}
+	if _, err := os.Stat(p.State); !os.IsNotExist(err) {
+		t.Fatal("state not removed")
+	}
+	if _, err := os.Stat(p.Token); err != nil {
+		t.Fatal("the persisted token file must survive cleanup")
 	}
 }
 
@@ -59,12 +55,15 @@ func TestStaleStateIsCleanedUp(t *testing.T) {
 	}
 	proc.Wait()
 	p.WriteState(State{PID: proc.Pid})
-	p.SaveToken("stale")
+	os.WriteFile(p.Token, []byte("persisted-token-value\n"), 0o600)
 	if st, err := p.Running(); st != nil || err != nil {
 		t.Fatalf("Running = %+v, %v; want nil for a dead pid", st, err)
 	}
-	if _, err := os.Stat(p.Token); !os.IsNotExist(err) {
-		t.Fatal("stale token file was not removed")
+	if _, err := os.Stat(p.State); !os.IsNotExist(err) {
+		t.Fatal("stale state file was not removed")
+	}
+	if _, err := os.Stat(p.Token); err != nil {
+		t.Fatal("the persisted token file must survive stale-state cleanup")
 	}
 }
 

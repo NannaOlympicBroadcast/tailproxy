@@ -219,7 +219,7 @@
 
 - **配置文件**：YAML，支持热重载（规则和出口组可以热更新；槽位增删会触发对应 tsnet 节点的启停）。
 - **本地 API**：由 Web 面板端口（默认 7708）上的 REST 接口提供，所有请求都需要访问令牌；目前可查询状态、配置、出口和规则，保存规则、重新加载配置。连接列表、槽位运行状态和临时切换出口，要等出口管理器实现后再加。
-- **CLI**：`tailproxy start|run|stop|status|token`（已实现，见 README）。`start` 以后台进程运行，面板就绪后打印地址和令牌再退出前台；状态文件、日志和可选的令牌文件放在 `~/.lighthousepro`。规则演练目前在 Web 面板里做，`tailproxy test <domain|ip>` 尚未实现。
+- **CLI**：`tailproxy start|run|stop|status|token`（已实现，见 README）。`start` 以后台进程运行，面板就绪后打印地址和令牌再退出前台；状态文件、日志和持久化的令牌文件放在 `~/.lighthousepro`。规则演练目前在 Web 面板里做，`tailproxy test <domain|ip>` 尚未实现。
 - **扩展点**：① Rule Provider；② Capture 后端接口（`Capture` interface，新平台只需实现它）；③ 可选的「sing-box 配置导出」后端，用作 PoC 或对照。
 - **移动端**：Go 核心通过 gomobile 编译为 Android AAR / iOS xcframework，外层是平台原生 UI。〔无来源·待验证：iOS Network Extension 的内存上限能否容纳多个 tsnet 节点〕
 
@@ -240,7 +240,7 @@
 
 **出站**（防火墙必须放行）：TCP 443（控制面和 DERP 中继）、UDP 3478（STUN）、WireGuard UDP 源端口；TCP 80 可选（控制面回退、强制门户检测）[来源 S47]。
 
-**Web 面板安全**〔无来源·设计决策〕：所有 API 和 `/metrics` 始终需要访问令牌。未通过 `panel.auth_token_env` 指定固定令牌时，每次启动随机生成 32 字节令牌，并在终端打印面板地址、令牌和一键登录链接（令牌放在 URL 的 `#` 片段里，不会发送到服务器）；来自环境变量的令牌不在终端回显。默认只监听回环地址，并校验 `Host` 头以防 DNS 重绑定；写操作拒绝跨站请求。更推荐只通过 tailnet 访问，这样可以复用 Tailscale 的身份认证和 ACL。
+**Web 面板安全**〔无来源·设计决策〕：所有 API 和 `/metrics` 始终需要访问令牌。未通过 `panel.auth_token_env` 指定令牌时，首次启动生成 32 字节随机令牌并持久化到 `~/.lighthousepro/tailproxy.token`（0600，之后每次启动沿用，`tailproxy token --rotate` 更换；`--ephemeral-token` 使用一次性令牌），并在终端打印面板地址、令牌和一键登录链接（令牌放在 URL 的 `#` 片段里，不会发送到服务器）；来自环境变量的令牌不在终端回显。默认只监听回环地址，并校验 `Host` 头以防 DNS 重绑定；写操作拒绝跨站请求。更推荐只通过 tailnet 访问，这样可以复用 Tailscale 的身份认证和 ACL。
 
 ---
 
@@ -291,7 +291,7 @@ capture:
 panel:
   listen: 127.0.0.1:7708            # Web 面板 + REST API + /metrics
   tailnet: false                    # 通过 ts 槽位对 tailnet 开放（受 ACL 控制；尚未实现）
-  auth_token_env: TAILPROXY_PANEL_TOKEN   # 可选：固定令牌（≥16 字符）；未设置时每次启动随机生成并打印
+  auth_token_env: TAILPROXY_PANEL_TOKEN   # 可选：用环境变量指定令牌（≥16 字符）；未设置时使用 ~/.lighthousepro/tailproxy.token
 
 wireguard_ports: auto               # auto | 41642-41649
 

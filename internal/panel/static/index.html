@@ -23,7 +23,7 @@
 
   <form id="login" class="card" hidden>
     <h2>登录 tailproxy 面板</h2>
-    <p class="muted">启动 tailproxy 时，终端会打印访问令牌和一键登录链接。打开那个链接即可自动登录，也可以把令牌粘贴到下面。如果设置了 <code>panel.auth_token_env</code>，令牌就是该环境变量的值。</p>
+    <p class="muted">执行 <code>tailproxy start</code> 时，终端会打印访问令牌和一键登录链接；之后随时可以用 <code>tailproxy token</code> 查看。打开一键登录链接即可自动登录，也可以把令牌粘贴到下面。如果设置了 <code>panel.auth_token_env</code>，令牌就是该环境变量的值。</p>
     <input id="token" type="password" autocomplete="off" placeholder="访问令牌" required>
     <p id="login-error" class="login-error" hidden></p>
     <button type="submit">登录</button>

@@ -4,10 +4,8 @@ package panel
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/subtle"
 	"embed"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,11 +37,14 @@ type Server struct {
 	version string
 	started time.Time
 
-	// token is always set: every API call needs it. tokenEnv names the
-	// environment variable it came from, or is empty when it was generated.
-	token    string
-	tokenEnv string
-	loopback bool // panel.listen is a loopback address
+	// token is always set: every API call needs it. At most one of tokenEnv
+	// (environment variable) and tokenFile (persisted file) is set; neither
+	// means a one-off token generated for this run.
+	token        string
+	tokenEnv     string
+	tokenFile    string
+	tokenCreated bool // tokenFile did not exist and was created by this run
+	loopback     bool // panel.listen is a loopback address
 
 	bound atomic.Pointer[string] // actual listen address once Listen succeeded
 
@@ -62,14 +63,19 @@ type Server struct {
 	ruleSaves     atomic.Uint64
 }
 
-// MinTokenLen is the shortest fixed token accepted from the environment.
-const MinTokenLen = 16
+// Options controls where the panel token comes from.
+type Options struct {
+	// TokenFile persists the token: it is read from this file, or generated
+	// and written there (mode 0600) if the file does not exist, so the token
+	// survives restarts. Empty means a one-off token for this run only.
+	TokenFile string
+}
 
 // New loads the configuration at cfgPath and prepares the panel. Access
-// always requires a token: the value of the environment variable named by
-// panel.auth_token_env if that is set and non-empty, otherwise a random token
-// generated for this run.
-func New(cfgPath, version string) (*Server, error) {
+// always requires a token, taken from, in order: the environment variable
+// named by panel.auth_token_env (if set and non-empty), opts.TokenFile, or a
+// random token generated for this run.
+func New(cfgPath, version string, opts Options) (*Server, error) {
 	s := &Server{cfgPath: cfgPath, version: version, started: time.Now()}
 	if err := s.loadFromDisk(); err != nil {
 		return nil, err
@@ -82,6 +88,13 @@ func New(cfgPath, version string) (*Server, error) {
 			}
 			s.token, s.tokenEnv = v, env
 		}
+	}
+	if s.token == "" && opts.TokenFile != "" {
+		t, created, err := LoadOrCreateToken(opts.TokenFile)
+		if err != nil {
+			return nil, err
+		}
+		s.token, s.tokenFile, s.tokenCreated = t, opts.TokenFile, created
 	}
 	if s.token == "" {
 		t, err := generateToken()
@@ -98,21 +111,17 @@ func New(cfgPath, version string) (*Server, error) {
 	return s, nil
 }
 
-// generateToken returns 32 random bytes, base64url-encoded (43 characters).
-func generateToken() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("generate panel token: %w", err)
-	}
-	return base64.RawURLEncoding.EncodeToString(b), nil
-}
-
 // Token returns the panel access token.
 func (s *Server) Token() string { return s.token }
 
-// TokenEnv returns the environment variable the token was read from, or ""
-// when the token was generated for this run.
+// TokenEnv returns the environment variable the token was read from, or "".
 func (s *Server) TokenEnv() string { return s.tokenEnv }
+
+// TokenFile returns the file the token is persisted in, or "".
+func (s *Server) TokenFile() string { return s.tokenFile }
+
+// TokenCreated reports whether this run generated and saved a new token file.
+func (s *Server) TokenCreated() bool { return s.tokenCreated }
 
 // URL returns a browser URL for the panel. An unspecified listen host
 // (0.0.0.0, ::, empty) is shown as 127.0.0.1.
@@ -411,8 +420,11 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 }
 
 func (s *Server) tokenSource() string {
-	if s.tokenEnv != "" {
+	switch {
+	case s.tokenEnv != "":
 		return "env:" + s.tokenEnv
+	case s.tokenFile != "":
+		return "file:" + s.tokenFile
 	}
 	return "generated"
 }

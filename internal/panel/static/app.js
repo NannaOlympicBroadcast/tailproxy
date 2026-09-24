@@ -109,9 +109,10 @@ async function loadStatus() {
   $("cfg-path").textContent = s.config_path;
   $("cfg-loaded").textContent = fmtTime(s.config_loaded);
   $("panel-listen").textContent = s.panel_listen;
-  $("auth").textContent = s.token_source === "generated"
-    ? "本次启动随机生成（重启后失效）"
-    : "来自环境变量 $" + s.token_source.replace(/^env:/, "");
+  const src = s.token_source || "";
+  $("auth").textContent = src.startsWith("file:") ? "持久化保存在 " + src.slice(5) + "（重启后不变）"
+    : src.startsWith("env:") ? "来自环境变量 $" + src.slice(4)
+    : "一次性令牌（进程退出即失效）";
   const tb = $("components");
   tb.replaceChildren();
   for (const c of s.components) {
@@ -190,7 +191,7 @@ async function loadConfig() {
 function authFailed() {
   const hadToken = !!token;
   saveToken("");
-  showLogin(true, hadToken ? "令牌无效或已过期（tailproxy 重启后随机令牌会改变），请使用终端里最新打印的令牌。" : "");
+  showLogin(true, hadToken ? "令牌无效：可能已用 tailproxy token --rotate 更换并重启了服务，或者服务是用一次性令牌启动的。在服务器上执行 tailproxy token 可以查看当前令牌。" : "");
 }
 
 async function refresh() {
