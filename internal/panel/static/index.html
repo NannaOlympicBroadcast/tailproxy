@@ -62,7 +62,7 @@
   <section id="rules" class="tab" hidden>
     <div class="card">
       <h2>规则测试</h2>
-      <p class="muted">输入域名和/或 IP，查看会命中哪条规则、走哪个出口。结果来自正在运行的规则引擎。</p>
+      <p class="muted">输入域名和/或 IP，查看会命中哪条规则、走哪个出口。<span id="test-mode">结果来自正在运行的规则引擎。</span></p>
       <form id="test" class="row">
         <input id="t-domain" placeholder="域名，如 chat.openai.com">
         <input id="t-ip" placeholder="IP，如 203.0.113.9">
@@ -72,8 +72,29 @@
       <div id="test-result" class="result" hidden></div>
     </div>
     <div class="card">
-      <h2>规则列表（按顺序首条命中）</h2>
-      <table><thead><tr><th>#</th><th>匹配条件</th><th>目标</th></tr></thead><tbody id="rule-list"></tbody></table>
+      <div class="card-head">
+        <h2>规则列表（按顺序首条命中）</h2>
+        <button id="edit-start" type="button">编辑规则</button>
+      </div>
+      <div id="rule-view">
+        <table><thead><tr><th>#</th><th>匹配条件</th><th>目标</th></tr></thead><tbody id="rule-list"></tbody></table>
+      </div>
+      <div id="rule-editor" hidden>
+        <p class="muted">每个条件框一行一个值（也可以用逗号或空格分隔）。同一条规则里，域名类条件和 IP 段之间是「或」，端口是「且」。保存后写回配置文件的 <code>rules:</code> 段，文件其余部分保持不变，旧文件另存为 <code>.bak</code>。</p>
+        <div id="edit-errors" class="banner error" hidden></div>
+        <div id="edit-rules"></div>
+        <div class="final-row">
+          <label for="edit-final">兜底（final）</label>
+          <select id="edit-final"></select>
+        </div>
+        <div class="toolbar">
+          <button id="edit-add" type="button" class="secondary">＋ 添加规则</button>
+          <span class="spacer"></span>
+          <span id="edit-status" class="muted"></span>
+          <button id="edit-cancel" type="button" class="secondary">放弃修改</button>
+          <button id="edit-save" type="button">保存</button>
+        </div>
+      </div>
     </div>
   </section>
 

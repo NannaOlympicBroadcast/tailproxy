@@ -21,7 +21,12 @@ async function api(path, opts = {}) {
   const res = await fetch(path, Object.assign({}, opts, { headers }));
   if (res.status === 401) throw new AuthError("unauthorized");
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error || res.status + " " + res.statusText);
+  if (!res.ok) {
+    const err = new Error(body.error || res.status + " " + res.statusText);
+    err.status = res.status;
+    if (Array.isArray(body.errors)) err.details = body.errors;
+    throw err;
+  }
   return body;
 }
 
@@ -116,8 +121,11 @@ const COND_LABELS = [
   ["domain", "域名"], ["domain_suffix", "后缀"], ["domain_keyword", "关键词"], ["ip_cidr", "IP 段"], ["port", "端口"],
 ];
 
+let rulesState = { rules: [], targets: [], revision: "" };
+
 async function loadRules() {
   const r = await api("/api/v1/rules");
+  rulesState = r;
   const tb = $("rule-list");
   tb.replaceChildren();
   r.rules.forEach((rule, i) => {
@@ -194,20 +202,252 @@ $("test").addEventListener("submit", async (ev) => {
   out.hidden = false;
   out.replaceChildren(el("span", "测试中…", "muted"));
   try {
+    if (editing) body.rules = buildDraftRules();
     const r = await api("/api/v1/rules/test", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+    const head = el("div", "目标：" + r.target, "target");
+    if (editing) head.append(el("span", "草稿", "draft-tag"));
     out.replaceChildren(
-      el("div", "目标：" + r.target, "target"),
+      head,
       el("div", r.implicit ? "未命中任何规则" : `命中规则 #${r.rule_index}`),
       el("div", "原因：" + r.reason, "muted"),
     );
   } catch (err) {
     if (err instanceof AuthError) { showLogin(true); return; }
     out.replaceChildren(el("span", "测试失败：" + err.message));
+    if (err.details) out.append(errorList(err.details));
   }
+});
+
+/* ---------- 规则可视化编辑 ---------- */
+
+const EDIT_FIELDS = [
+  ["domain_keyword", "关键词（子串匹配）", "例：openai"],
+  ["domain_suffix", "域名后缀", "例：.jp"],
+  ["domain", "完整域名", "例：www.example.com"],
+  ["ip_cidr", "IP 段", "例：203.0.113.0/24"],
+  ["port", "端口（可选）", "例：443"],
+];
+
+let editing = false;
+let dirty = false;
+let draft = []; // [{target, domain_keyword: "text", ...}]
+let editBaseRevision = "";
+
+function splitValues(text) {
+  return text.split(/[\s,，]+/).map((v) => v.trim()).filter(Boolean);
+}
+
+function errorList(items) {
+  const ul = el("ul");
+  for (const e of items) ul.append(el("li", e));
+  return ul;
+}
+
+function markDirty() {
+  dirty = true;
+  $("edit-status").textContent = "有未保存的修改";
+}
+
+function startEdit() {
+  const rules = rulesState.rules || [];
+  const last = rules[rules.length - 1];
+  const hasFinal = last && last.final;
+  draft = (hasFinal ? rules.slice(0, -1) : rules).map((r) => {
+    const d = { target: r.egress };
+    for (const [k] of EDIT_FIELDS) d[k] = (r[k] || []).join("\n");
+    return d;
+  });
+  editBaseRevision = rulesState.revision;
+  editing = true;
+  dirty = false;
+  renderFinalSelect(hasFinal ? last.final : "");
+  renderDraft();
+  showEditErrors(null);
+  $("edit-status").textContent = "";
+  $("rule-view").hidden = true;
+  $("rule-editor").hidden = false;
+  $("edit-start").hidden = true;
+  $("test-mode").textContent = "编辑期间，测试使用尚未保存的草稿。";
+}
+
+function stopEdit() {
+  editing = false;
+  dirty = false;
+  $("rule-view").hidden = false;
+  $("rule-editor").hidden = true;
+  $("edit-start").hidden = false;
+  $("test-mode").textContent = "结果来自正在运行的规则引擎。";
+}
+
+function targetSelect(value, allowNone) {
+  const sel = el("select");
+  if (allowNone) sel.append(new Option("不设置（未命中隐式走 direct）", ""));
+  const targets = rulesState.targets || [];
+  for (const t of targets) sel.append(new Option(t, t));
+  if (value && !targets.includes(value)) sel.append(new Option(value + "（不存在）", value));
+  sel.value = value || (allowNone ? "" : targets[0] || "");
+  return sel;
+}
+
+function renderFinalSelect(value) {
+  const old = $("edit-final");
+  const sel = targetSelect(value, true);
+  sel.id = "edit-final";
+  sel.addEventListener("change", markDirty);
+  old.replaceWith(sel);
+}
+
+function renderDraft() {
+  const box = $("edit-rules");
+  box.replaceChildren();
+  if (draft.length === 0) box.append(el("p", "还没有规则。点「添加规则」新建一条。", "muted"));
+  draft.forEach((d, i) => {
+    const card = el("div", null, "rule-edit");
+    card.dataset.index = i;
+    const head = el("div", null, "head");
+    head.append(el("span", "#" + i, "num"), el("span", "目标", "muted"));
+    const sel = targetSelect(d.target, false);
+    if (!d.target) d.target = sel.value;
+    sel.addEventListener("change", () => { d.target = sel.value; markDirty(); });
+    head.append(sel, el("span", null, "spacer"));
+    const btn = (label, title, cls, fn, disabled) => {
+      const b = el("button", label, cls);
+      b.type = "button";
+      b.title = title;
+      b.setAttribute("aria-label", title);
+      b.disabled = !!disabled;
+      b.addEventListener("click", fn);
+      return b;
+    };
+    head.append(
+      btn("↑", "上移", "secondary icon", () => moveRule(i, -1), i === 0),
+      btn("↓", "下移", "secondary icon", () => moveRule(i, 1), i === draft.length - 1),
+      btn("删除", "删除这条规则", "danger icon", () => { draft.splice(i, 1); markDirty(); renderDraft(); }),
+    );
+    card.append(head);
+    const fields = el("div", null, "fields");
+    for (const [k, label, ph] of EDIT_FIELDS) {
+      const wrap = el("div");
+      const id = `edit-${i}-${k}`;
+      const lab = el("label", label);
+      lab.htmlFor = id;
+      const ta = el("textarea");
+      ta.id = id;
+      ta.placeholder = ph;
+      ta.value = d[k] || "";
+      ta.spellcheck = false;
+      ta.addEventListener("input", () => { d[k] = ta.value; markDirty(); });
+      wrap.append(lab, ta);
+      fields.append(wrap);
+    }
+    card.append(fields);
+    box.append(card);
+  });
+}
+
+function moveRule(i, delta) {
+  const j = i + delta;
+  if (j < 0 || j >= draft.length) return;
+  [draft[i], draft[j]] = [draft[j], draft[i]];
+  markDirty();
+  renderDraft();
+}
+
+function buildDraftRules() {
+  const rules = draft.map((d, i) => {
+    const r = {};
+    for (const [k] of EDIT_FIELDS) {
+      const vals = splitValues(d[k] || "");
+      if (!vals.length) continue;
+      r[k] = k !== "port" ? vals : vals.map((v) => {
+        const n = Number(v);
+        if (!/^\d+$/.test(v) || n > 65535) throw new Error(`rules[${i}]: 端口 "${v}" 无效，必须是 0–65535 的整数`);
+        return n;
+      });
+    }
+    r.egress = d.target;
+    return r;
+  });
+  const fin = $("edit-final").value;
+  if (fin) rules.push({ final: fin });
+  return rules;
+}
+
+function showEditErrors(items, conflict) {
+  const box = $("edit-errors");
+  document.querySelectorAll(".rule-edit.invalid").forEach((c) => c.classList.remove("invalid"));
+  if (!items || !items.length) { box.hidden = true; box.replaceChildren(); return; }
+  box.replaceChildren(el("strong", conflict ? "保存冲突" : "无法保存"), errorList(items));
+  if (conflict) {
+    const b = el("button", "放弃草稿并载入最新规则", "secondary");
+    b.type = "button";
+    b.addEventListener("click", async () => { await refresh(); startEdit(); });
+    box.append(b);
+  }
+  box.hidden = false;
+  for (const e of items) {
+    const m = /^rules\[(\d+)\]/.exec(e);
+    const card = m && document.querySelector(`.rule-edit[data-index="${m[1]}"]`);
+    if (card) card.classList.add("invalid");
+  }
+}
+
+async function saveRules() {
+  let rules;
+  try {
+    rules = buildDraftRules();
+  } catch (err) {
+    showEditErrors([err.message]);
+    return;
+  }
+  const btn = $("edit-save");
+  btn.disabled = true;
+  $("edit-status").textContent = "保存中…";
+  try {
+    const r = await api("/api/v1/rules", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ revision: editBaseRevision, rules }),
+    });
+    stopEdit();
+    await refresh();
+    $("edit-status").textContent = "";
+    showSaved(`已保存 ${r.rules} 条规则，并已生效；旧配置备份在 ${r.backup}`);
+  } catch (err) {
+    if (err instanceof AuthError) { showLogin(true); return; }
+    $("edit-status").textContent = "";
+    showEditErrors(err.details || [err.message], err.status === 409);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function showSaved(msg) {
+  const out = $("test-result");
+  out.hidden = false;
+  out.replaceChildren(el("div", msg));
+}
+
+$("edit-start").addEventListener("click", startEdit);
+$("edit-add").addEventListener("click", () => {
+  draft.push({ target: "" });
+  markDirty();
+  renderDraft();
+  const cards = document.querySelectorAll(".rule-edit");
+  const last = cards[cards.length - 1];
+  if (last) { last.scrollIntoView({ block: "nearest" }); last.querySelector("textarea").focus(); }
+});
+$("edit-cancel").addEventListener("click", () => {
+  if (dirty && !confirm("放弃所有未保存的修改？")) return;
+  stopEdit();
+});
+$("edit-save").addEventListener("click", saveRules);
+window.addEventListener("beforeunload", (ev) => {
+  if (editing && dirty) { ev.preventDefault(); ev.returnValue = ""; }
 });
 
 window.addEventListener("hashchange", () => { if ($("login").hidden) selectTab(currentTab()); });

@@ -221,6 +221,16 @@ func (c *Config) Validate() error {
 		} else if !hasCond {
 			errs = append(errs, fmt.Errorf("rules[%d]: no match conditions", i))
 		}
+		for _, f := range []struct {
+			name string
+			vals []string
+		}{{"domain", r.Domain}, {"domain_suffix", r.DomainSuffix}, {"domain_keyword", r.DomainKeyword}} {
+			for _, v := range f.vals {
+				if v = strings.TrimSpace(v); v == "" || v == "." {
+					errs = append(errs, fmt.Errorf("rules[%d]: empty value in %s", i, f.name))
+				}
+			}
+		}
 		for _, p := range r.IPCIDR {
 			if _, err := ParsePrefix(p); err != nil {
 				errs = append(errs, fmt.Errorf("rules[%d]: %w", i, err))

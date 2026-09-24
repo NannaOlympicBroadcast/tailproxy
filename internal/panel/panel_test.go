@@ -157,3 +157,129 @@ func TestReload(t *testing.T) {
 		t.Fatalf("failed reload must keep old rules: %s", rec.Body.String())
 	}
 }
+
+func getRevision(t *testing.T, h http.Handler) string {
+	t.Helper()
+	var r struct{ Revision string }
+	rec := do(t, h, "GET", "/api/v1/rules", "", nil)
+	if err := json.Unmarshal(rec.Body.Bytes(), &r); err != nil || r.Revision == "" {
+		t.Fatalf("rules: %d %s", rec.Code, rec.Body.String())
+	}
+	return r.Revision
+}
+
+var jsonHdr = map[string]string{"Content-Type": "application/json"}
+
+func TestSaveRules(t *testing.T) {
+	cfg := "# keep this comment\n" + testConfig + "panel:\n  listen: 127.0.0.1:7708   # aligned comment\n"
+	s, path := newTestServer(t, cfg)
+	h := s.Handler()
+	rev := getRevision(t, h)
+	body := `{"revision":"` + rev + `","rules":[{"domain_suffix":["example.org"],"egress":"jp"},{"final":"us"}]}`
+	rec := do(t, h, "PUT", "/api/v1/rules", body, jsonHdr)
+	if rec.Code != 200 {
+		t.Fatalf("save: %d %s", rec.Code, rec.Body.String())
+	}
+	written, _ := os.ReadFile(path)
+	for _, want := range []string{"# keep this comment", "listen: 127.0.0.1:7708   # aligned comment", "- {domain_suffix: [example.org], egress: jp}", "- {final: us}"} {
+		if !strings.Contains(string(written), want) {
+			t.Fatalf("written file missing %q:\n%s", want, written)
+		}
+	}
+	if bak, _ := os.ReadFile(path + ".bak"); string(bak) != cfg {
+		t.Fatalf("backup mismatch:\n%s", bak)
+	}
+	rec = do(t, h, "POST", "/api/v1/rules/test", `{"domain":"www.example.org"}`, nil)
+	if !strings.Contains(rec.Body.String(), `"target": "jp"`) {
+		t.Fatalf("engine not updated: %s", rec.Body.String())
+	}
+	if newRev := getRevision(t, h); newRev == rev {
+		t.Fatal("revision did not change after save")
+	}
+	// Saving again with the stale revision is a conflict.
+	if rec := do(t, h, "PUT", "/api/v1/rules", body, jsonHdr); rec.Code != 409 {
+		t.Fatalf("stale revision: %d", rec.Code)
+	}
+}
+
+func TestSaveRulesConflictWhenFileEditedOnDisk(t *testing.T) {
+	s, path := newTestServer(t, testConfig)
+	h := s.Handler()
+	rev := getRevision(t, h)
+	os.WriteFile(path, []byte(testConfig+"  - {final: jp}\n"), 0o600)
+	rec := do(t, h, "PUT", "/api/v1/rules", `{"revision":"`+rev+`","rules":[]}`, jsonHdr)
+	if rec.Code != 409 {
+		t.Fatalf("got %d %s", rec.Code, rec.Body.String())
+	}
+	if data, _ := os.ReadFile(path); !strings.Contains(string(data), "final: jp") {
+		t.Fatal("conflicting save must not touch the file")
+	}
+}
+
+func TestSaveRulesValidation(t *testing.T) {
+	s, path := newTestServer(t, testConfig)
+	h := s.Handler()
+	rev := getRevision(t, h)
+	cases := []struct {
+		body string
+		code int
+	}{
+		{`{"revision":"` + rev + `","rules":[{"domain":["a.com"],"egress":"nope"}]}`, 400},
+		{`{"revision":"` + rev + `","rules":[{"final":"direct"},{"domain":["a.com"],"egress":"us"}]}`, 400},
+		{`{"revision":"` + rev + `","rules":[{"domain_keyword":[" "],"egress":"us"}]}`, 400},
+		{`{"revision":"` + rev + `","rules":[],"x":1}`, 400},
+	}
+	for _, c := range cases {
+		rec := do(t, h, "PUT", "/api/v1/rules", c.body, jsonHdr)
+		if rec.Code != c.code {
+			t.Fatalf("%s: got %d %s", c.body, rec.Code, rec.Body.String())
+		}
+	}
+	if rec := do(t, h, "PUT", "/api/v1/rules", `{"revision":"`+rev+`","rules":[]}`, map[string]string{"Content-Type": "text/plain"}); rec.Code != 415 {
+		t.Fatalf("wrong content type: %d", rec.Code)
+	}
+	if data, _ := os.ReadFile(path); string(data) != testConfig {
+		t.Fatal("rejected saves must not touch the file")
+	}
+	if _, err := os.Stat(path + ".bak"); !os.IsNotExist(err) {
+		t.Fatal("rejected saves must not write a backup")
+	}
+}
+
+func TestCrossSiteWritesRefused(t *testing.T) {
+	s, _ := newTestServer(t, testConfig)
+	h := s.Handler()
+	rev := getRevision(t, h)
+	body := `{"revision":"` + rev + `","rules":[]}`
+	for _, hdr := range []map[string]string{
+		{"Content-Type": "application/json", "Origin": "https://evil.example"},
+		{"Content-Type": "application/json", "Sec-Fetch-Site": "cross-site"},
+	} {
+		if rec := do(t, h, "PUT", "/api/v1/rules", body, hdr); rec.Code != 403 {
+			t.Fatalf("%v: got %d", hdr, rec.Code)
+		}
+	}
+	if rec := do(t, h, "POST", "/api/v1/config/reload", "", map[string]string{"Origin": "http://evil.example"}); rec.Code != 403 {
+		t.Fatalf("cross-site reload: %d", rec.Code)
+	}
+	same := map[string]string{"Content-Type": "application/json", "Origin": "http://127.0.0.1:7708", "Sec-Fetch-Site": "same-origin"}
+	if rec := do(t, h, "PUT", "/api/v1/rules", body, same); rec.Code != 200 {
+		t.Fatalf("same-origin save: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRuleTestWithDraft(t *testing.T) {
+	s, _ := newTestServer(t, testConfig)
+	h := s.Handler()
+	rec := do(t, h, "POST", "/api/v1/rules/test", `{"domain":"chat.openai.com","rules":[{"domain_keyword":["openai"],"egress":"jp"}]}`, nil)
+	if !strings.Contains(rec.Body.String(), `"target": "jp"`) {
+		t.Fatalf("draft: %s", rec.Body.String())
+	}
+	rec = do(t, h, "POST", "/api/v1/rules/test", `{"domain":"chat.openai.com"}`, nil)
+	if !strings.Contains(rec.Body.String(), `"target": "us"`) {
+		t.Fatalf("running rules must be unchanged: %s", rec.Body.String())
+	}
+	if rec := do(t, h, "POST", "/api/v1/rules/test", `{"domain":"a","rules":[{"domain":["a"],"egress":"nope"}]}`, nil); rec.Code != 400 {
+		t.Fatalf("invalid draft: %d", rec.Code)
+	}
+}

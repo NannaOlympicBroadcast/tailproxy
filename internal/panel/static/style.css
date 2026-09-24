@@ -89,3 +89,29 @@ button:disabled { opacity: .6; cursor: default; }
 .result { margin-top: 12px; padding: 12px; border-radius: 6px; background: var(--code-bg); }
 .result .target { font-size: 18px; font-weight: 600; }
 .tag { display: inline-block; margin: 1px 4px 1px 0; }
+.card-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.card-head h2 { margin: 0; margin-right: auto; }
+button.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
+button.danger { background: transparent; color: var(--err-text); border: 1px solid var(--border); }
+button.icon { padding: 4px 10px; }
+select {
+  padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); color: var(--text); font: inherit;
+}
+textarea {
+  width: 100%; min-height: 60px; resize: vertical; padding: 6px 8px;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px;
+}
+textarea::placeholder, input::placeholder { color: var(--muted); opacity: .55; font-style: italic; }
+.rule-edit { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+.rule-edit.invalid { border-color: var(--err-text); }
+.rule-edit .head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
+.rule-edit .head .num { font-weight: 600; min-width: 2em; }
+.rule-edit .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+.rule-edit .fields label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+.final-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 12px; }
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.spacer { flex: 1; }
+#edit-errors ul { margin: 4px 0 0; padding-left: 20px; }
+.draft-tag { display: inline-block; font-size: 12px; padding: 0 6px; border-radius: 4px; background: var(--warn-bg); color: var(--warn-text); margin-left: 6px; }

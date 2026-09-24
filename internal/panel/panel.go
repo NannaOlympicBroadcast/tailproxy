@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -41,26 +42,26 @@ type Server struct {
 	cfg    *config.Config
 	engine *rule.Engine
 	loaded time.Time
+	rev    string // config.Revision of the file content cfg was parsed from
+
+	writeMu sync.Mutex // serializes config reloads and rule saves
 
 	requests      atomic.Uint64
 	ruleTests     atomic.Uint64
 	reloadsOK     atomic.Uint64
 	reloadsFailed atomic.Uint64
+	ruleSaves     atomic.Uint64
 }
 
 // New loads the configuration at cfgPath and prepares the panel. The panel
 // token is read from the environment variable named by panel.auth_token_env.
 // A panel listening on a non-loopback address refuses to start without one.
 func New(cfgPath, version string) (*Server, error) {
-	cfg, err := config.Load(cfgPath)
-	if err != nil {
+	s := &Server{cfgPath: cfgPath, version: version, started: time.Now()}
+	if err := s.loadFromDisk(); err != nil {
 		return nil, err
 	}
-	engine, err := rule.Compile(cfg.Rules)
-	if err != nil {
-		return nil, err
-	}
-	s := &Server{cfgPath: cfgPath, version: version, started: time.Now(), cfg: cfg, engine: engine, loaded: time.Now()}
+	cfg := s.cfg
 	if cfg.Panel.AuthTokenEnv != "" {
 		s.token = os.Getenv(cfg.Panel.AuthTokenEnv)
 	}
@@ -123,6 +124,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/config/reload", s.auth(s.handleReload))
 	mux.HandleFunc("GET /api/v1/egress", s.auth(s.handleEgress))
 	mux.HandleFunc("GET /api/v1/rules", s.auth(s.handleRules))
+	mux.HandleFunc("PUT /api/v1/rules", s.auth(s.handleRulesPut))
 	mux.HandleFunc("POST /api/v1/rules/test", s.auth(s.handleRuleTest))
 	mux.HandleFunc("GET /metrics", s.auth(s.handleMetrics))
 	return s.hostGuard(mux)
@@ -139,6 +141,10 @@ func (s *Server) hostGuard(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		if s.token == "" && !isLoopbackHost(r.Host) {
 			http.Error(w, "forbidden host", http.StatusForbidden)
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && isCrossSite(r) {
+			http.Error(w, "cross-site request refused", http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -203,24 +209,40 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, cfg)
 }
 
-func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.Load(s.cfgPath)
-	var engine *rule.Engine
-	if err == nil {
-		engine, err = rule.Compile(cfg.Rules)
-	}
+// loadFromDisk reads, validates and compiles the config file and swaps it in.
+// On error the current state is kept.
+func (s *Server) loadFromDisk() error {
+	data, err := os.ReadFile(s.cfgPath)
 	if err != nil {
+		return err
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		return err
+	}
+	engine, err := rule.Compile(cfg.Rules)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.cfg, s.engine, s.loaded, s.rev = cfg, engine, time.Now(), config.Revision(data)
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	old, _, _ := s.snapshot()
+	if err := s.loadFromDisk(); err != nil {
 		s.reloadsFailed.Add(1)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	s.mu.Lock()
-	old := s.cfg.Panel
-	s.cfg, s.engine, s.loaded = cfg, engine, time.Now()
-	s.mu.Unlock()
 	s.reloadsOK.Add(1)
+	cfg, engine, _ := s.snapshot()
 	resp := map[string]any{"ok": true, "rules": engine.Len()}
-	if cfg.Panel != old {
+	if cfg.Panel != old.Panel {
 		resp["warning"] = "panel 配置的变更需要重启 tailproxy 才会生效"
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -236,11 +258,23 @@ func (s *Server) handleEgress(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRules(w http.ResponseWriter, r *http.Request) {
-	cfg, _, _ := s.snapshot()
+	s.mu.RLock()
+	cfg, rev := s.cfg, s.rev
+	s.mu.RUnlock()
 	implicitFinal := len(cfg.Rules) == 0 || cfg.Rules[len(cfg.Rules)-1].Final == ""
+	targets := []string{config.TargetDirect, config.TargetTailnet, config.TargetReject}
+	for _, e := range cfg.Egress {
+		targets = append(targets, e.Name)
+	}
+	rules := cfg.Rules
+	if rules == nil {
+		rules = []config.Rule{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"rules":          cfg.Rules,
+		"rules":          rules,
 		"implicit_final": implicitFinal,
+		"targets":        targets,
+		"revision":       rev,
 	})
 }
 
@@ -248,11 +282,14 @@ type ruleTestRequest struct {
 	Domain string `json:"domain"`
 	IP     string `json:"ip"`
 	Port   uint16 `json:"port"`
+	// Rules, when set, tests against this unsaved draft instead of the
+	// running rules. The draft is validated against the current egress list.
+	Rules *[]config.Rule `json:"rules,omitempty"`
 }
 
 func (s *Server) handleRuleTest(w http.ResponseWriter, r *http.Request) {
 	var req ruleTestRequest
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRulesBody))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
@@ -271,7 +308,14 @@ func (s *Server) handleRuleTest(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "domain or ip is required"})
 		return
 	}
-	_, engine, _ := s.snapshot()
+	cfg, engine, _ := s.snapshot()
+	if req.Rules != nil {
+		var err error
+		if engine, err = compileDraft(cfg, *req.Rules); err != nil {
+			writeValidationError(w, err)
+			return
+		}
+	}
 	s.ruleTests.Add(1)
 	writeJSON(w, http.StatusOK, engine.Match(q))
 }
@@ -285,6 +329,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "# HELP tailproxy_egress_configured Number of configured egress entries.\n# TYPE tailproxy_egress_configured gauge\ntailproxy_egress_configured %d\n", len(cfg.Egress))
 	fmt.Fprintf(w, "# HELP tailproxy_panel_http_requests_total HTTP requests served by the panel.\n# TYPE tailproxy_panel_http_requests_total counter\ntailproxy_panel_http_requests_total %d\n", s.requests.Load())
 	fmt.Fprintf(w, "# HELP tailproxy_rule_tests_total Rule test requests.\n# TYPE tailproxy_rule_tests_total counter\ntailproxy_rule_tests_total %d\n", s.ruleTests.Load())
+	fmt.Fprintf(w, "# HELP tailproxy_rule_saves_total Rule sets saved from the panel.\n# TYPE tailproxy_rule_saves_total counter\ntailproxy_rule_saves_total %d\n", s.ruleSaves.Load())
 	fmt.Fprintf(w, "# HELP tailproxy_config_reloads_total Config reloads by result.\n# TYPE tailproxy_config_reloads_total counter\ntailproxy_config_reloads_total{result=\"ok\"} %d\ntailproxy_config_reloads_total{result=\"error\"} %d\n", s.reloadsOK.Load(), s.reloadsFailed.Load())
 }
 
@@ -295,6 +340,21 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	enc.Encode(v)
+}
+
+// isCrossSite reports whether a state-changing request came from another
+// site. Without a token a loopback panel would otherwise accept requests that
+// any web page open in the user's browser can send to 127.0.0.1.
+func isCrossSite(r *http.Request) bool {
+	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
+		return true
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return false // non-browser clients such as curl
+	}
+	u, err := url.Parse(origin)
+	return err != nil || u.Host != r.Host
 }
 
 func isLoopbackListen(addr string) (bool, error) {
