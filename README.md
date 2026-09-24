@@ -15,7 +15,8 @@
 | 出口管理器（`internal/egress`）：每个出口一个内嵌 tsnet 节点、固定出口节点、经出口的 DoH 解析、故障转移 / 延迟优选组与健康检查 | 已实现；出口节点出口已在真实 tailnet 上验证（见下文），出口组尚未在真实环境验证 |
 | SOCKS5 入口（`internal/proxy`，仅 CONNECT、仅回环地址）+ 连接追踪 | 已实现 |
 | 中继出口（`tailproxy relay` + `internal/relay`）：客户端只用一台 tailnet 设备就能有多个出口 | 已实现；已在真实 tailnet（中国 + 美国 VPS）上端到端验证 |
-| 透明捕获（TUN / TPROXY）、FakeIP DNS、SNI 嗅探、UDP | 未实现 |
+| Linux 透明捕获（`capture.mode: tproxy`）：nftables TPROXY + 策略路由、FakeIP / 分流 DNS、SNI / HTTP Host 嗅探、DNS 劫持、防回环 | 已实现；在网络命名空间里做了端到端集成测试，**尚未在真实路由器 / OpenWrt 上验证** |
+| TUN（Windows / macOS / Android / iOS）、UDP 代理、DoH 端点封堵（L2）、ECH 剥离（L3） | 未实现 |
 
 ## 启动与管理
 
@@ -218,6 +219,41 @@ egress:
 - 这次测试发现并修复了一个出口节点方式的 bug：经出口节点的 DoH 解析可能只拿到 IPv6，或者在空闲后卡住（见提交 dde44c6）。
 
 **日志上传**：内嵌的 tsnet 与官方客户端一样，默认会把诊断日志上传到 `log.tailscale.com`。不希望上传时，启动前设置 `TS_NO_LOGS_NO_SUPPORT=true`（systemd 服务写进 `tailproxy.env`）。
+
+### 透明捕获（Linux，TPROXY）
+
+不想给每个应用配 SOCKS5 时，在 Linux 主机或路由器上用 root 运行 tailproxy，并打开透明捕获：
+
+```yaml
+capture:
+  mode: tproxy
+  scope: selective          # selective（默认）| all
+  tproxy_port: 7893
+  dns_listen: 127.0.0.1:1053  # 路由器给局域网用时改成 0.0.0.0:1053
+dns:
+  mode: fakeip
+  direct_upstream: system   # 或 "223.5.5.5, 119.29.29.29"
+  anti_bypass: { canary: true }
+  unknown_domain: ip_rules_only   # ip_rules_only | reject | egress:<名称>
+```
+
+启动后 tailproxy 会：
+
+- 建一张 nftables 表 `inet tailproxy`，加一条策略路由（`fwmark 0x2000 → table 7893`，本地路由到 lo）。TCP 经 TPROXY 送进 tailproxy，本机和局域网的 DNS（53 端口）重定向到 tailproxy 的 DNS。
+- **selective（推荐）**：DNS 只给「可能命中非 direct 规则」的域名返回 FakeIP（`198.18.0.0/15`、`fc00::/18`），其余域名照常返回真实 IP。捕获只接管 FakeIP 地址池和规则里的 `ip_cidr`，所以没命中规则的流量**根本不经过 tailproxy**（DESIGN §4.6 的 A 路径）。
+- **all**：接管除私有、组播和 tailnet 地址以外的全部 TCP；域名靠 FakeIP 或 SNI / HTTP Host 嗅探得到，没命中规则的走 `direct`。
+- 连接的域名来源依次是：FakeIP 反查、TLS ClientHello 的 SNI、HTTP 的 Host。ECH 连接的 SNI 只是外层公共名，面板上会标出来；有 FakeIP 映射时以映射为准。
+- 发往 FakeIP 的 UDP（如 QUIC）会立刻返回「不可达」，应用会马上改用 TCP。目前只代理 TCP。
+- `use-application-dns.net` 返回 NXDOMAIN，让 Firefox 关闭默认开启的 DoH。
+- 发往 FakeIP 的 HTTPS / SVCB 记录返回空，防止客户端用记录里的 IP 提示或 ECH 配置绕开 FakeIP。
+
+防回环：Tailscale 在 Linux 上以 root 运行时，会给自己的套接字打 `SO_MARK 0x80000`（`tailscale.com/net/netns`），tsnet 同样如此。tailproxy 的直连和上游 DNS 查询也打这个标记，nft 规则会放过带这个标记的包，所以既不会回环，也不会把 tsnet 自己的 WireGuard 流量再抓回来。
+
+**崩溃恢复**：进程异常退出时，规则可能会残留，导致被捕获的流量没有去处。可以用 `sudo tailproxy capture down` 立即删除。systemd 服务已经加了 `ExecStopPost=-tailproxy capture down`，服务停止或崩溃时会自动清理；下次启动时也会先清掉残留。
+
+**要求**：root；nftables（`nft` 命令）；内核支持 `nft_tproxy` / `nft_socket`（OpenWrt：`opkg install nftables kmod-nft-tproxy kmod-nft-socket`）。策略路由直接通过 netlink 设置，不依赖 `ip` 命令。IPv6 被禁用的主机会自动只用 IPv4。
+
+**验证情况**：`internal/capture` 的集成测试在独立的网络命名空间里跑真实的 nftables TPROXY，覆盖以下内容：DNS 劫持得到 FakeIP；FakeIP 连接按域名交给出口；`ip_cidr` + Host 嗅探；某个端口走 direct 的 FakeIP 域名（带绕行标记、用上游解析，不会再拿到 FakeIP）；UDP 到 FakeIP 立即不可达；all 模式；清理后无残留。还没有在真实路由器或局域网客户端上验证。
 
 ### API
 

@@ -112,8 +112,20 @@ type AntiBypass struct {
 	LearnRuleIPs bool     `yaml:"learn_rule_ips" json:"learn_rule_ips"`
 }
 
+// Capture modes.
+const (
+	CaptureAuto   = "auto"   // currently: SOCKS5 inbound only, no system changes
+	CaptureSOCKS  = "socks"  // SOCKS5 inbound only
+	CaptureTProxy = "tproxy" // Linux nftables TPROXY + DNS front end
+	CaptureTUN    = "tun"    // not implemented yet
+)
+
 type Capture struct {
-	Mode        string   `yaml:"mode" json:"mode"`
+	Mode string `yaml:"mode" json:"mode"`
+	// Scope for tproxy: "selective" (default: FakeIP pools and routed
+	// ip_cidr only; unmatched traffic never enters tailproxy) or "all"
+	// (all TCP except excluded and private ranges).
+	Scope       string   `yaml:"scope,omitempty" json:"scope,omitempty"`
 	ExcludeCIDR []string `yaml:"exclude_cidr" json:"exclude_cidr"`
 	SocksListen string   `yaml:"socks_listen" json:"socks_listen"`
 	TProxyPort  uint16   `yaml:"tproxy_port" json:"tproxy_port"`
@@ -174,7 +186,27 @@ func (c *Config) applyDefaults() {
 	if c.Panel.Listen == "" {
 		c.Panel.Listen = DefaultPanelListen
 	}
+	if c.Capture.Mode == CaptureTProxy {
+		if c.Capture.TProxyPort == 0 {
+			c.Capture.TProxyPort = DefaultTProxyPort
+		}
+		if c.Capture.DNSListen == "" {
+			c.Capture.DNSListen = DefaultDNSListen
+		}
+		if c.Capture.Scope == "" {
+			c.Capture.Scope = "selective"
+		}
+	}
+	if c.DNS.Mode == "" {
+		c.DNS.Mode = "fakeip"
+	}
 }
+
+// Defaults for transparent capture (DESIGN §4.10).
+const (
+	DefaultTProxyPort = 7893
+	DefaultDNSListen  = "127.0.0.1:1053"
+)
 
 // Validate checks cross-references between egress entries and rules.
 func (c *Config) Validate() error {
@@ -298,7 +330,61 @@ func (c *Config) Validate() error {
 	if _, _, err := net.SplitHostPort(c.Panel.Listen); err != nil {
 		errs = append(errs, fmt.Errorf("panel.listen: %w", err))
 	}
+	errs = append(errs, c.validateCapture(names)...)
 	return errors.Join(errs...)
+}
+
+func (c *Config) validateCapture(egressNames map[string]bool) []error {
+	var errs []error
+	switch c.Capture.Mode {
+	case "", CaptureAuto, CaptureSOCKS, CaptureTProxy:
+	case CaptureTUN:
+		errs = append(errs, errors.New("capture.mode: tun is not implemented yet; use tproxy (Linux) or socks"))
+	default:
+		errs = append(errs, fmt.Errorf("capture.mode %q: want auto, socks, tproxy or tun", c.Capture.Mode))
+	}
+	switch c.Capture.Scope {
+	case "", "selective", "all":
+	default:
+		errs = append(errs, fmt.Errorf("capture.scope %q: want selective or all", c.Capture.Scope))
+	}
+	for _, p := range c.Capture.ExcludeCIDR {
+		if _, err := ParsePrefix(p); err != nil {
+			errs = append(errs, fmt.Errorf("capture.exclude_cidr: %w", err))
+		}
+	}
+	if c.Capture.DNSListen != "" {
+		if _, _, err := net.SplitHostPort(c.Capture.DNSListen); err != nil {
+			errs = append(errs, fmt.Errorf("capture.dns_listen: %w", err))
+		}
+	}
+	switch c.DNS.Mode {
+	case "", "fakeip", "real":
+	default:
+		errs = append(errs, fmt.Errorf("dns.mode %q: want fakeip or real", c.DNS.Mode))
+	}
+	for name, s := range map[string]string{"dns.fakeip.inet4": c.DNS.FakeIP.Inet4, "dns.fakeip.inet6": c.DNS.FakeIP.Inet6} {
+		if s == "" {
+			continue
+		}
+		p, err := ParsePrefix(s)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+		case (name == "dns.fakeip.inet4") != p.Addr().Is4():
+			errs = append(errs, fmt.Errorf("%s: %s is the wrong address family", name, s))
+		}
+	}
+	switch u := c.DNS.UnknownDomain; {
+	case u == "", u == "ip_rules_only", u == "reject":
+	case strings.HasPrefix(u, "egress:"):
+		if t := strings.TrimPrefix(u, "egress:"); !egressNames[t] && t != TargetTailnet {
+			errs = append(errs, fmt.Errorf("dns.unknown_domain: %q is not a defined egress", t))
+		}
+	default:
+		errs = append(errs, fmt.Errorf("dns.unknown_domain %q: want ip_rules_only, reject or egress:<name>", u))
+	}
+	return errs
 }
 
 // validEgressName: lower-case letters, digits and '-', not starting with '-'.

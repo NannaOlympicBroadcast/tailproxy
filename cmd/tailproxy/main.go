@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/NannaOlympicBroadcast/tailproxy/internal/config"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/egress"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/panel"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/proxy"
@@ -44,6 +45,7 @@ const usage = `用法：tailproxy <命令> [参数]
   token    打印持久化保存的访问令牌；加 --rotate 生成新令牌（重启服务后生效）
   service  install / uninstall：安装为 systemd 服务并开机自启（见 tailproxy service -h）
   relay    在出口机器（VPS）上运行中继，客户端经 tailnet 用它出网（见 tailproxy relay -h）
+  capture  down：删除透明捕获留下的 nftables 规则和策略路由（进程崩溃后恢复网络用）
   version  打印版本
 
 start / run 的参数：
@@ -80,6 +82,8 @@ func main() {
 		err = cmdService(args)
 	case "relay":
 		err = cmdRelay(args)
+	case "capture":
+		err = cmdCapture(args)
 	case "version", "--version", "-version":
 		fmt.Println(version)
 	case "help", "-h", "--help":
@@ -250,6 +254,14 @@ func cmdRun(args []string) (err error) {
 		defer socksLn.Close()
 		rt.socksAddr = socksLn.Addr().String()
 	}
+	if cfg.Capture.Mode == config.CaptureTProxy {
+		capt, err := setupCapture(cfg, p.Engine, router, f.paths.Dir)
+		if err != nil {
+			return err
+		}
+		defer capt.Close()
+		rt.capture = capt
+	}
 	p.SetRuntime(rt)
 
 	st := service.State{PID: os.Getpid(), URL: p.URL(), Config: f.config, TokenEnv: p.TokenEnv(), TokenFile: p.TokenFile(), Started: time.Now()}
@@ -298,6 +310,9 @@ func cmdRun(args []string) (err error) {
 	}()
 	mgr.Start(ctx)
 	defer mgr.Close()
+	if rt.capture != nil {
+		go rt.capture.Serve(ctx)
+	}
 	if socksLn != nil {
 		socks := &proxy.SOCKS{Router: router, Logf: log.Printf}
 		go func() {

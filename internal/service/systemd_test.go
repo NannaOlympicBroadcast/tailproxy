@@ -17,6 +17,7 @@ func TestUnitSystem(t *testing.T) {
 		"ReadWritePaths=/etc/tailproxy /home/alice/.lighthousepro\n",
 		"ProtectSystem=strict",
 		"EnvironmentFile=-/home/alice/.lighthousepro/tailproxy.env\n",
+		"ExecStopPost=-/usr/local/bin/tailproxy capture down\n",
 		"After=network-online.target",
 		"WantedBy=multi-user.target",
 	} {

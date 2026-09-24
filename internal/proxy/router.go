@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,22 +30,74 @@ type Router struct {
 	Rules   func() *rule.Engine // current rules; changes with panel edits
 	Egress  Egress
 	Tracker *Tracker
-	Direct  net.Dialer
+	// Direct dials direct targets. With transparent capture its Control
+	// sets the bypass mark and its Resolver skips the FakeIP front end.
+	Direct net.Dialer
+	// UnknownDomain applies when a transparently captured connection's
+	// domain could not be determined (dns.unknown_domain): "" or
+	// "ip_rules_only" matches IP rules only, "reject" refuses it, and
+	// "egress:<name>" sends it there.
+	UnknownDomain string
 }
 
-// Connect matches host:port against the rules and dials the target. The
-// returned Conn is registered in the tracker; call Relay (or finish it) when
-// done. On error the connection is already recorded as failed.
+// Dest is where a connection goes, as far as the inbound knows.
+type Dest struct {
+	Domain    string     // "" if unknown
+	IP        netip.Addr // real destination address; invalid for FakeIPs
+	Port      uint16
+	DomainSrc string // socks, fakeip, tls, http
+	ECH       bool
+	// Transparent is set for captured connections, where UnknownDomain
+	// applies.
+	Transparent bool
+}
+
+// Connect matches host:port (a domain or an IP) against the rules and dials
+// the target. The returned Conn is registered in the tracker; call Relay
+// (or finish it) when done. On error the connection is already recorded as
+// failed.
 func (r *Router) Connect(ctx context.Context, inbound, source, host string, port uint16) (net.Conn, *Conn, error) {
-	q := rule.Query{Port: port}
+	d := Dest{Port: port}
 	if ip, err := netip.ParseAddr(host); err == nil {
-		q.IP = ip.Unmap()
+		d.IP = ip.Unmap()
 	} else {
-		q.Domain = host
+		d.Domain, d.DomainSrc = host, "socks"
 	}
+	return r.ConnectDest(ctx, inbound, source, d)
+}
+
+// ConnectDest is Connect for a destination that may have both a domain and
+// an address. Domain rules see the domain; IP rules see the real address.
+func (r *Router) ConnectDest(ctx context.Context, inbound, source string, d Dest) (net.Conn, *Conn, error) {
+	q := rule.Query{Domain: d.Domain, IP: d.IP, Port: d.Port}
 	res := r.Rules().Match(q)
-	c := &Conn{Inbound: inbound, Source: source, Host: host, Port: port, RuleIndex: res.RuleIndex, Reason: res.Reason, Target: res.Target}
+	if d.Transparent && d.Domain == "" {
+		switch {
+		case r.UnknownDomain == "reject":
+			res = rule.Result{RuleIndex: -1, Target: config.TargetReject, Reason: "domain unknown (dns.unknown_domain: reject)"}
+		case strings.HasPrefix(r.UnknownDomain, "egress:") && res.RuleIndex < 0:
+			res = rule.Result{RuleIndex: -1, Target: strings.TrimPrefix(r.UnknownDomain, "egress:"), Reason: "domain unknown (dns.unknown_domain)"}
+		}
+	}
+	host := d.Domain
+	if host == "" {
+		host = d.IP.String()
+	}
+	c := &Conn{Inbound: inbound, Source: source, Host: host, Port: d.Port, DomainSrc: d.DomainSrc, ECH: d.ECH,
+		RuleIndex: res.RuleIndex, Reason: res.Reason, Target: res.Target}
+	if d.IP.IsValid() && d.Domain != "" {
+		c.DestIP = d.IP.String()
+	}
 	r.Tracker.add(c)
+
+	// Egresses resolve names themselves (at the exit), so they get the
+	// domain; direct and tailnet keep the address the client chose, unless
+	// it was a FakeIP.
+	dialHost := host
+	if d.IP.IsValid() && (res.Target == config.TargetDirect || res.Target == config.TargetTailnet) {
+		dialHost = d.IP.String()
+	}
+	port := d.Port
 
 	var (
 		out net.Conn
@@ -55,12 +108,12 @@ func (r *Router) Connect(ctx context.Context, inbound, source, host string, port
 		err = ErrRejected
 	case config.TargetDirect:
 		dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		out, err = r.Direct.DialContext(dctx, "tcp", net.JoinHostPort(host, strconv.Itoa(int(port))))
+		out, err = r.Direct.DialContext(dctx, "tcp", net.JoinHostPort(dialHost, strconv.Itoa(int(port))))
 		cancel()
 	case config.TargetTailnet:
-		out, c.Via, err = r.Egress.DialTailnet(ctx, host, port)
+		out, c.Via, err = r.Egress.DialTailnet(ctx, dialHost, port)
 	default:
-		out, c.Via, err = r.Egress.Dial(ctx, res.Target, host, port)
+		out, c.Via, err = r.Egress.Dial(ctx, res.Target, dialHost, port)
 	}
 	if err != nil {
 		r.Tracker.finish(c, err.Error())

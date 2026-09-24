@@ -543,7 +543,12 @@ function connRow(c, active) {
   tr.append(el("td", new Date(c.started).toLocaleTimeString()));
   const dst = el("td");
   dst.append(el("div", `${c.host}:${c.port}`));
-  dst.append(el("div", `${c.inbound} ${c.source}`, "muted"));
+  const SRC = { fakeip: "FakeIP", tls: "SNI", http: "HTTP Host", socks: "SOCKS" };
+  const meta = [c.inbound, c.source];
+  if (c.domain_source && c.domain_source !== "socks") meta.push("域名来自 " + (SRC[c.domain_source] || c.domain_source));
+  if (c.dest_ip) meta.push("目的 IP " + c.dest_ip);
+  if (c.ech) meta.push("ECH（SNI 仅为外层名）");
+  dst.append(el("div", meta.join(" · "), "muted"));
   tr.append(dst);
   tr.append(el("td", c.rule_index >= 0 ? `#${c.rule_index} ${c.reason}` : c.reason));
   tr.append(el("td", c.via && c.via !== c.target ? `${c.target} → ${c.via}` : c.target));

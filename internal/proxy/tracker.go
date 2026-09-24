@@ -1,4 +1,4 @@
-// Package proxy routes connections from the inbounds (SOCKS5 for now) to
+// Package proxy routes connections from the inbounds (SOCKS5, TPROXY) to
 // direct / reject / tailnet / egress targets according to the rule engine,
 // and tracks them for the panel.
 package proxy
@@ -17,8 +17,11 @@ type Conn struct {
 	Started   time.Time
 	Inbound   string
 	Source    string
-	Host      string // as requested: domain or IP
+	Host      string // domain if known, else the destination IP
 	Port      uint16
+	DestIP    string // original destination IP (transparent capture), if any
+	DomainSrc string // where Host came from: socks, fakeip, tls, http; "" for none
+	ECH       bool   // ClientHello had ECH: a sniffed Host is only the outer name
 	RuleIndex int
 	Reason    string
 	Target    string // rule target: direct, reject, tailnet or an egress name
@@ -40,6 +43,9 @@ type ConnView struct {
 	Source    string     `json:"source"`
 	Host      string     `json:"host"`
 	Port      uint16     `json:"port"`
+	DestIP    string     `json:"dest_ip,omitempty"`
+	DomainSrc string     `json:"domain_source,omitempty"`
+	ECH       bool       `json:"ech,omitempty"`
 	RuleIndex int        `json:"rule_index"`
 	Reason    string     `json:"reason"`
 	Target    string     `json:"target"`
@@ -94,6 +100,7 @@ func (c *Conn) view() ConnView {
 	defer c.mu.Unlock()
 	v := ConnView{
 		ID: c.ID, Started: c.Started, Inbound: c.Inbound, Source: c.Source, Host: c.Host, Port: c.Port,
+		DestIP: c.DestIP, DomainSrc: c.DomainSrc, ECH: c.ECH,
 		RuleIndex: c.RuleIndex, Reason: c.Reason, Target: c.Target, Via: c.Via,
 		Up: c.up.Load(), Down: c.down.Load(), Error: c.err,
 	}

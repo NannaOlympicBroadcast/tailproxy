@@ -95,6 +95,10 @@ func Unit(o UnitOptions) (string, error) {
 		// Optional secrets such as TS_AUTHKEY; "-" means the file may be absent.
 		fmt.Fprintf(&b, "EnvironmentFile=-%s\n", quoteArg(filepath.Join(o.StateDir, "tailproxy.env")))
 		fmt.Fprintf(&b, "ExecStart=%s run -c %s --state-dir %s\n", quoteArg(o.Exe), quoteArg(o.Config), quoteArg(o.StateDir))
+		// With capture.mode tproxy, a crash would leave nft rules sending
+		// traffic to a dead listener; remove them whenever the service
+		// stops ("-": fine when capture was not used or not root).
+		fmt.Fprintf(&b, "ExecStopPost=-%s capture down\n", quoteArg(o.Exe))
 		b.WriteString("Restart=on-failure\nRestartSec=3\n")
 		b.WriteString("TimeoutStartSec=30\nTimeoutStopSec=15\n")
 	}

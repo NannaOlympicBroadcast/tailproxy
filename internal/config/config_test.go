@@ -84,3 +84,30 @@ func TestLoadMissingFile(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestCaptureConfig(t *testing.T) {
+	c, err := Parse([]byte("capture: {mode: tproxy}\negress: [{name: us, exit_node: a}]\nrules: []\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Capture.TProxyPort != DefaultTProxyPort || c.Capture.DNSListen != DefaultDNSListen || c.Capture.Scope != "selective" || c.DNS.Mode != "fakeip" {
+		t.Fatalf("defaults: %+v %+v", c.Capture, c.DNS.Mode)
+	}
+	for _, bad := range []string{
+		"capture: {mode: tun}\nrules: []\n",
+		"capture: {mode: magic}\nrules: []\n",
+		"capture: {mode: tproxy, scope: some}\nrules: []\n",
+		"capture: {exclude_cidr: [not-a-cidr]}\nrules: []\n",
+		"dns: {mode: dnssec}\nrules: []\n",
+		"dns: {fakeip: {inet4: 'fc00::/18'}}\nrules: []\n",
+		"dns: {unknown_domain: 'egress:nope'}\nrules: []\n",
+		"dns: {unknown_domain: maybe}\nrules: []\n",
+	} {
+		if _, err := Parse([]byte(bad)); err == nil {
+			t.Errorf("accepted: %s", bad)
+		}
+	}
+	if _, err := Parse([]byte("egress: [{name: us, exit_node: a}]\ndns: {unknown_domain: 'egress:us'}\nrules: []\n")); err != nil {
+		t.Errorf("egress:us rejected: %v", err)
+	}
+}

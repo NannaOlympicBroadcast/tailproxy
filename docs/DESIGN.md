@@ -114,7 +114,7 @@
 - 移动端：因为只能有一个 VPN [来源 S7][来源 S14]，tailproxy 本身**替代**官方 App，由内置的 `ts` 槽位（不设置出口的 tsnet 节点）提供 tailnet 访问。〔无来源·设计决策〕
 
 **防止回环（关键）**：tsnet 节点底层的 WireGuard 和 DERP 流量不能再次被 TUN 或 TPROXY 捕获。
-- Linux：Tailscale 自己的 `netns` 包会给套接字打 `SO_MARK` 绕行标记（`LinuxBypassMark = 0x80000`），不支持时退回 `SO_BINDTODEVICE` [来源 S15][来源 S16]。nft 规则直接放行带这个标记的包。〔无来源·待验证：在 tsnet 进程内是否同样生效〕
+- Linux：Tailscale 自己的 `netns` 包会给套接字打 `SO_MARK` 绕行标记（`LinuxBypassMark = 0x80000`），不支持时退回 `SO_BINDTODEVICE` [来源 S15][来源 S16]。nft 规则直接放行带这个标记的包。**已核实**：tsnet 进程内同样生效。`netns` 默认开启，`controlC` 对非本机地址的套接字调用 `setBypassMark`；非 root 时会忽略设置失败，所以透明捕获要求 root [来源 S51]。tailproxy 的直连和上游 DNS 查询也打同一个标记。
 - macOS / Windows：把底层套接字绑定到物理网卡（`IP_BOUND_IF` / `IP_UNICAST_IF`）。〔无来源·待验证〕
 - 风险：sing-box 使用的是自己的 Tailscale 分支（`github.com/sagernet/tailscale`），并向 tsnet 注入了自定义的底层 `DialContext` [来源 S6]。上游 tsnet 可能没有这个注入点，届时需要维护一个小补丁或 fork。〔无来源·待验证〕
 
@@ -326,8 +326,8 @@ rules:
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| M0 PoC | 两个 tsnet 槽位加 SOCKS5 入口，支持 keyword/CIDR 规则 | 通过两个槽位访问 IP 回显服务，返回的是两个不同出口的公网 IP。**状态**：代码已实现（采用方案 D，即上游 tsnet），跳过了用 sing-box 做原型；验收项需要真实 tailnet，尚未完成 |
-| M1 Linux | nft TPROXY、FakeIP DNS、SNI/HTTP 嗅探、回环防护、CLI | 路由器（OpenWrt）上透明分流，没有 DNS 泄漏 |
+| M0 PoC | 两个 tsnet 槽位加 SOCKS5 入口，支持 keyword/CIDR 规则 | 通过两个槽位访问 IP 回显服务，返回的是两个不同出口的公网 IP。**状态：已验收（2026-09-24）**：在真实 tailnet 上，同一客户端经中国、美国两个出口分别得到 106.52.30.242 和 186.244.245.39（出口节点和中继两种方式都验证过，见 README） |
+| M1 Linux | nft TPROXY、FakeIP DNS、SNI/HTTP 嗅探、回环防护、CLI | 路由器（OpenWrt）上透明分流，没有 DNS 泄漏。**状态**：TPROXY（selective / all）、策略路由（netlink）、FakeIP + 分流 DNS、DNS 劫持、canary、SNI/Host 嗅探、防回环、`capture down` 都已实现，并在网络命名空间里做了集成测试；UDP 代理、L2 DoH 封堵、L3 ECH 剥离、L0 统计视图尚未实现；验收项需要真实路由器，尚未完成 |
 | M2 桌面 | Windows Wintun、macOS utun、与系统 Tailscale 共存 | 官方客户端保持 tailnet 访问，tailproxy 负责出口分流 |
 | M3 移动 | Android VpnService、iOS NEPacketTunnelProvider（gomobile） | 单个 VPN 同时提供 tailnet 访问和多出口分流 |
 | M4 生态 | Rule Provider、出口组健康检查、指标、GUI | — |
@@ -403,4 +403,5 @@ rules:
 | S48 | RFC 1928 SOCKS Protocol Version 5：https://www.rfc-editor.org/rfc/rfc1928 |
 | S49 | RFC 1929 Username/Password Authentication for SOCKS V5：https://www.rfc-editor.org/rfc/rfc1929 |
 | S50 | AWS EC2 – Access instance metadata（IMDS 地址 169.254.169.254）：https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instancedata-data-retrieval.html |
+| S51 | tailscale.com v1.102.4 源码 `net/netns/netns_linux.go`（`controlC`、`setBypassMark`、`UseSocketMark`）：https://github.com/tailscale/tailscale/blob/v1.102.4/net/netns/netns_linux.go |
 | S27 | Apple TN3120 – Expected use cases for Network Extension packet tunnel providers：https://developer.apple.com/documentation/technotes/tn3120-expected-use-cases-for-network-extension-packet-tunnel-providers |

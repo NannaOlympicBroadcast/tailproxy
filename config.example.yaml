@@ -36,7 +36,8 @@ dns:
   unknown_domain: ip_rules_only     # ip_rules_only | egress:<name> | reject
 
 capture:
-  mode: auto                        # auto | tun | tproxy | socks
+  mode: auto                        # auto（= 仅 SOCKS5，不改系统）| socks | tproxy（Linux，需 root）| tun（未实现）
+  scope: selective                  # tproxy：selective 只接管 FakeIP 和规则里的 ip_cidr；all 接管全部 TCP
   exclude_cidr: [100.64.0.0/10, fd7a:115c:a1e0::/48, 192.168.0.0/16]
   socks_listen: 127.0.0.1:1080      # 可选，默认关闭
   tproxy_port: 7893                 # 仅 Linux TPROXY

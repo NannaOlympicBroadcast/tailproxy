@@ -15,6 +15,7 @@ type runtimeView struct {
 	egress    *egress.Manager
 	tracker   *proxy.Tracker
 	socksAddr string // empty when the SOCKS5 inbound is disabled
+	capture   *captureRuntime
 }
 
 func (r *runtimeView) Components() []panel.Component {
@@ -28,9 +29,16 @@ func (r *runtimeView) Components() []panel.Component {
 	snap := r.tracker.Snapshot()
 	out = append(out,
 		panel.Component{Name: "connections", State: "running", Detail: fmt.Sprintf("活动 %d，累计 %d，失败 %d", len(snap.Active), snap.Total, snap.Failed)},
-		panel.Component{Name: "transparent_capture", State: "not_implemented", Detail: "TUN / TPROXY 透明捕获尚未实现（DESIGN §4.1），目前只能通过 SOCKS5 入口使用"},
-		panel.Component{Name: "dns", State: "not_implemented", Detail: "FakeIP / 分流 DNS 尚未实现（DESIGN §4.2、§4.8）；出口槽位内的域名通过该出口做 DoH 解析"},
 	)
+	if r.capture != nil {
+		cs, cd, ds, dd := r.capture.Summary()
+		out = append(out, panel.Component{Name: "transparent_capture", State: cs, Detail: cd}, panel.Component{Name: "dns", State: ds, Detail: dd})
+	} else {
+		out = append(out,
+			panel.Component{Name: "transparent_capture", State: "disabled", Detail: "未开启（capture.mode: tproxy 开启 Linux 透明捕获；TUN 尚未实现）"},
+			panel.Component{Name: "dns", State: "disabled", Detail: "随透明捕获开启；出口内的域名通过该出口做 DoH 解析"},
+		)
+	}
 	return out
 }
 
