@@ -1,0 +1,55 @@
+# tailproxy 配置示例，字段说明见 docs/DESIGN.md §5。
+tailnet:
+  control_url: https://controlplane.tailscale.com
+  auth_key_env: TS_AUTHKEY          # 不把密钥写进文件
+  advertise_tags: [tag:tailproxy]
+  state_dir: /var/lib/tailproxy     # 每个槽位使用子目录
+
+egress:
+  - name: jp
+    exit_node: tokyo-vps            # 主机名 / 100.x IP / StableID
+  - name: us
+    exit_node: 100.101.102.103
+  - name: auto
+    type: fallback
+    members: [us, jp]
+    health_check: { url: https://www.gstatic.com/generate_204, interval: 60s }
+
+dns:
+  mode: fakeip                      # fakeip | real
+  fakeip: { inet4: 198.18.0.0/15, inet6: fc00::/18 }
+  per_egress_doh: https://1.1.1.1/dns-query
+  direct_upstream: system
+  anti_bypass:                      # 见 4.8
+    canary: true                    # use-application-dns.net → NXDOMAIN
+    block_doh: true                 # 公开 DoH 域名 / IP 列表，定时更新
+    doh_lists:
+      - https://raw.githubusercontent.com/dibdot/DoH-IP-blocklists/master/doh-domains.txt
+      - https://raw.githubusercontent.com/dibdot/DoH-IP-blocklists/master/doh-ipv4.txt
+      - https://raw.githubusercontent.com/dibdot/DoH-IP-blocklists/master/doh-ipv6.txt
+    doh_allow: []                   # 白名单
+    block_dot_doq: true             # TCP/UDP 853
+    strip_ech: auto                 # auto = 仅 real 模式开启
+    learn_rule_ips: true            # 规则域名预解析 + 应答学习
+  unknown_domain: ip_rules_only     # ip_rules_only | egress:<name> | reject
+
+capture:
+  mode: auto                        # auto | tun | tproxy | socks
+  exclude_cidr: [100.64.0.0/10, fd7a:115c:a1e0::/48, 192.168.0.0/16]
+  socks_listen: 127.0.0.1:1080      # 可选，默认关闭
+  tproxy_port: 7893                 # 仅 Linux TPROXY
+  dns_listen: 127.0.0.1:1053        # 仅路由器 / TPROXY 模式
+
+panel:
+  listen: 127.0.0.1:7708            # Web 面板 + REST API + /metrics
+  tailnet: true                     # 同时通过 ts 槽位对 tailnet 开放（受 ACL 控制）
+  auth_token_env: TAILPROXY_PANEL_TOKEN   # 监听非回环地址时必填
+
+wireguard_ports: auto               # auto | 41642-41649
+
+rules:
+  - { domain_keyword: [openai, anthropic, claude], egress: us }
+  - { domain_suffix: [.jp, nicovideo.jp],         egress: jp }
+  - { ip_cidr: [203.0.113.0/24],                  egress: jp }
+  - { domain_suffix: [.ts.net], ip_cidr: [100.64.0.0/10], egress: tailnet }
+  - { final: direct }

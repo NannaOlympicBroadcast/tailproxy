@@ -3,3 +3,53 @@
 基于 Tailscale 的跨平台透明代理插件：按域名关键词 / 后缀 / IP CIDR 规则，把流量分流到不同的 Tailscale 出口节点。
 
 - 设计文档：[docs/DESIGN.md](docs/DESIGN.md)
+
+## 当前进度
+
+| 模块 | 状态 |
+|---|---|
+| 配置加载与校验（`internal/config`） | 已实现 |
+| 规则引擎（`internal/rule`，首条命中；keyword / suffix / domain / ip_cidr / port） | 已实现 |
+| Web 面板 + REST API + `/metrics`（`internal/panel`，端口 7708） | 已实现 |
+| 出口管理器（tsnet 槽位）、捕获层（TUN / TPROXY / SOCKS）、FakeIP DNS | 未实现 |
+
+## 运行 Web 面板
+
+需要 Go 1.24 及以上版本。
+
+```sh
+go build -o tailproxy ./cmd/tailproxy
+./tailproxy -c config.example.yaml
+# 浏览器打开 http://127.0.0.1:7708
+```
+
+面板内容：
+
+- **概览**：各组件状态、规则和出口数量、重新加载配置。
+- **出口**：配置中的出口槽位和出口组。出口管理器尚未实现，所以运行状态一律显示「未运行」。
+- **规则**：规则列表，以及规则测试（输入域名 / IP / 端口，查看命中哪条规则、走哪个出口）。
+- **配置**：当前生效的配置。
+
+### API
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/v1/status` | 版本、运行时长、组件状态 |
+| GET | `/api/v1/config` | 当前生效的配置（只包含环境变量名，不含密钥） |
+| POST | `/api/v1/config/reload` | 重新加载配置文件；失败时保留旧配置 |
+| GET | `/api/v1/egress` | 配置中的出口（`runtime` 在出口管理器实现前为 `null`） |
+| GET | `/api/v1/rules` | 规则列表 |
+| POST | `/api/v1/rules/test` | `{"domain":"chat.openai.com","ip":"","port":443}` → 命中结果 |
+| GET | `/metrics` | Prometheus 文本格式指标 |
+
+### 访问控制
+
+- 默认只监听 `127.0.0.1:7708`，并且只接受回环地址的 `Host` 头，用来防御 DNS 重绑定攻击。
+- `panel.listen` 设为非回环地址时，必须在 `panel.auth_token_env` 指定的环境变量里设置令牌，否则拒绝启动。API 使用 `Authorization: Bearer <令牌>` 认证，页面会提示输入令牌。
+- `panel.tailnet`（只对 tailnet 开放面板）依赖 `ts` 槽位，尚未实现；设置后启动时会打印警告，面板仍只监听 `panel.listen`。
+
+## 测试
+
+```sh
+go test ./...
+```

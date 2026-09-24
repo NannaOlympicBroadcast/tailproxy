@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tailproxy 面板</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">tailproxy <span id="version" class="muted"></span></div>
+  <nav>
+    <a href="#overview" data-tab="overview">概览</a>
+    <a href="#egress" data-tab="egress">出口</a>
+    <a href="#rules" data-tab="rules">规则</a>
+    <a href="#config" data-tab="config">配置</a>
+  </nav>
+</header>
+
+<main>
+  <div id="error" class="banner error" hidden></div>
+
+  <form id="login" class="card" hidden>
+    <h2>需要访问令牌</h2>
+    <p class="muted">面板启用了令牌认证，请输入配置项 <code>panel.auth_token_env</code> 所指定的环境变量中设置的令牌。</p>
+    <input id="token" type="password" autocomplete="current-password" placeholder="访问令牌" required>
+    <button type="submit">登录</button>
+  </form>
+
+  <section id="overview" class="tab">
+    <div class="stats">
+      <div class="stat"><div class="label">运行时长</div><div class="value" id="uptime">—</div></div>
+      <div class="stat"><div class="label">规则数</div><div class="value" id="n-rules">—</div></div>
+      <div class="stat"><div class="label">出口槽位</div><div class="value" id="n-slots">—</div></div>
+      <div class="stat"><div class="label">出口组</div><div class="value" id="n-groups">—</div></div>
+    </div>
+    <div class="card">
+      <h2>组件状态</h2>
+      <table><thead><tr><th>组件</th><th>状态</th><th>说明</th></tr></thead><tbody id="components"></tbody></table>
+    </div>
+    <div class="card">
+      <h2>配置</h2>
+      <dl class="kv">
+        <dt>配置文件</dt><dd id="cfg-path">—</dd>
+        <dt>加载时间</dt><dd id="cfg-loaded">—</dd>
+        <dt>面板监听</dt><dd id="panel-listen">—</dd>
+        <dt>令牌认证</dt><dd id="auth">—</dd>
+      </dl>
+      <button id="reload" type="button">重新加载配置</button>
+      <span id="reload-msg" class="muted"></span>
+    </div>
+  </section>
+
+  <section id="egress" class="tab" hidden>
+    <div class="banner warn" id="egress-detail"></div>
+    <div class="card">
+      <h2>已配置的出口</h2>
+      <table><thead><tr><th>名称</th><th>类型</th><th>出口节点 / 成员</th><th>健康检查</th><th>运行状态</th></tr></thead><tbody id="egress-list"></tbody></table>
+    </div>
+  </section>
+
+  <section id="rules" class="tab" hidden>
+    <div class="card">
+      <h2>规则测试</h2>
+      <p class="muted">输入域名和/或 IP，查看会命中哪条规则、走哪个出口。结果来自正在运行的规则引擎。</p>
+      <form id="test" class="row">
+        <input id="t-domain" placeholder="域名，如 chat.openai.com">
+        <input id="t-ip" placeholder="IP，如 203.0.113.9">
+        <input id="t-port" type="number" min="0" max="65535" placeholder="端口">
+        <button type="submit">测试</button>
+      </form>
+      <div id="test-result" class="result" hidden></div>
+    </div>
+    <div class="card">
+      <h2>规则列表（按顺序首条命中）</h2>
+      <table><thead><tr><th>#</th><th>匹配条件</th><th>目标</th></tr></thead><tbody id="rule-list"></tbody></table>
+    </div>
+  </section>
+
+  <section id="config" class="tab" hidden>
+    <div class="card">
+      <h2>当前生效的配置</h2>
+      <p class="muted">配置里只保存环境变量名，不包含密钥本身。</p>
+      <pre id="config-json"></pre>
+    </div>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

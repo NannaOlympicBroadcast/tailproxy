@@ -1,0 +1,74 @@
+package config
+
+import (
+	"os"
+	"strings"
+	"testing"
+)
+
+func TestExampleConfigParses(t *testing.T) {
+	c, err := Load("../../config.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Panel.Listen != "127.0.0.1:7708" {
+		t.Fatalf("panel.listen = %q", c.Panel.Listen)
+	}
+	if len(c.Egress) != 3 || len(c.Rules) != 5 {
+		t.Fatalf("got %d egress, %d rules", len(c.Egress), len(c.Rules))
+	}
+}
+
+func TestDefaults(t *testing.T) {
+	c, err := Parse([]byte("rules: []\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Panel.Listen != DefaultPanelListen {
+		t.Fatalf("default listen = %q", c.Panel.Listen)
+	}
+	if _, err := Parse(nil); err != nil {
+		t.Fatalf("empty config: %v", err)
+	}
+}
+
+func TestValidateErrors(t *testing.T) {
+	tests := []struct {
+		name, yaml, want string
+	}{
+		{"unknown field", "egres: []", "field egres not found"},
+		{"reserved name", "egress: [{name: direct, exit_node: x}]", "reserved"},
+		{"duplicate", "egress: [{name: a, exit_node: x}, {name: a, exit_node: y}]", "duplicate"},
+		{"missing exit node", "egress: [{name: a}]", "exit_node is required"},
+		{"bad group member", "egress: [{name: g, type: fallback, members: [nope]}]", "not a defined slot"},
+		{"unknown type", "egress: [{name: g, type: random, members: [a]}]", "unknown type"},
+		{"unknown target", "rules: [{domain: [a.com], egress: nope}]", "unknown target"},
+		{"both targets", "rules: [{domain: [a.com], egress: direct, final: direct}]", "not both"},
+		{"no conditions", "rules: [{egress: direct}]", "no match conditions"},
+		{"final not last", "rules: [{final: direct}, {domain: [a.com], egress: direct}]", "must be the last"},
+		{"final with conditions", "rules: [{domain: [a.com], final: direct}]", "cannot have match conditions"},
+		{"bad cidr", "rules: [{ip_cidr: [300.0.0.0/8], egress: direct}]", "invalid ip_cidr"},
+		{"bad listen", "panel: {listen: '7708'}", "panel.listen"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse([]byte(tt.yaml))
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Parse(%q) error = %v, want containing %q", tt.yaml, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestParsePrefixBareIP(t *testing.T) {
+	p, err := ParsePrefix("::ffff:10.0.0.1")
+	if err != nil || p.String() != "10.0.0.1/32" {
+		t.Fatalf("got %v, %v", p, err)
+	}
+}
+
+func TestLoadMissingFile(t *testing.T) {
+	if _, err := Load("does-not-exist.yaml"); !os.IsNotExist(err) {
+		t.Fatalf("got %v", err)
+	}
+}
