@@ -65,7 +65,32 @@ tailproxy dev
 
 后台进程脱离终端运行：独立会话（setsid）、没有控制终端、stdin 指向 `/dev/null`、工作目录为 `/`（因此配置文件路径会先转成绝对路径）。
 
-**平台**：后台模式支持 Linux 和 macOS。Windows 目前只支持 `tailproxy run`（前台）；`tailproxy start` 在 Windows 上会明确报错，以后应改为注册成 Windows 服务。开机自启（systemd / launchd）尚未提供。
+**平台**：后台模式支持 Linux 和 macOS。Windows 目前只支持 `tailproxy run`（前台）；`tailproxy start` 在 Windows 上会明确报错，以后应改为注册成 Windows 服务。Linux 可以用 systemd 开机自启（见下文）；macOS 的 launchd 尚未提供。
+
+### 开机自启（systemd）
+
+```sh
+# 系统服务（推荐）：开机自动启动，需要 root；默认以 sudo 调用者的身份运行
+sudo ./tailproxy service install -c /path/to/config.yaml
+
+# 或者：用户服务（不需要 root），并尝试 loginctl enable-linger 让它开机即启动
+./tailproxy service install --user -c /path/to/config.yaml
+
+# 只看生成的单元文件，不安装
+./tailproxy service install --print -c /path/to/config.yaml
+
+# 卸载（停止、取消开机自启、删除单元文件；令牌文件保留）
+sudo ./tailproxy service uninstall        # 用户服务加 --user
+```
+
+`install` 会写入单元文件（系统服务：`/etc/systemd/system/tailproxy.service`；用户服务：`~/.config/systemd/user/tailproxy.service`），执行 `daemon-reload` 和 `enable --now`，等服务就绪后在终端打印面板地址和访问令牌。
+
+- 单元文件使用 `Type=notify`：tailproxy 在面板真正开始监听后才通知 systemd 已就绪；退出时发送 `STOPPING=1`。`Restart=on-failure`，崩溃 3 秒后自动重启。
+- 单元文件里写的都是绝对路径：二进制本身、配置文件、状态目录。移动了二进制或配置文件后，要重新执行 `install`。
+- 由 systemd 运行时，**令牌不会写进 journald**，日志里只提示用 `tailproxy token` 查看。令牌仍持久化在运行用户的 `~/.lighthousepro/tailproxy.token`，开机和重启后都不变。
+- 系统服务带有沙箱加固：`ProtectSystem=strict`、`ProtectHome=read-only`、`NoNewPrivileges` 等。只有状态目录和配置文件所在目录可写，因为面板保存规则时要写回配置文件。
+- 由 systemd 管理时，`tailproxy stop` 会提示改用 `systemctl stop tailproxy.service`；`tailproxy status` / `tailproxy token` 照常可用。系统服务的状态和令牌属于运行用户，以其他用户身份查看时需要加 `--state-dir` 指向该目录。
+- 已验证：生成的系统单元文件能通过 `systemd-analyze verify`，就绪通知协议已测试。**尚未在真实开机流程中验证**：开发环境里 systemd 没有作为 1 号进程运行。
 
 在浏览器里打开「一键登录」链接即可进入面板；也可以打开面板地址，再粘贴令牌登录。浏览器把令牌保存在当前标签页的 sessionStorage 里，关闭标签页或点「退出」后需要重新登录（令牌本身仍然有效）。
 

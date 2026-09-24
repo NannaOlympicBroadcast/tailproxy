@@ -60,6 +60,8 @@ type State struct {
 	TokenFile string    `json:"token_file,omitempty"` // persisted token file; empty for env or one-off tokens
 	TokenEnv  string    `json:"token_env,omitempty"`
 	Started   time.Time `json:"started"`
+	Manager   string    `json:"manager,omitempty"` // "systemd" when run as a systemd unit
+	UserUnit  bool      `json:"user_unit,omitempty"`
 }
 
 // ReadState returns the recorded instance, or (nil, nil) if there is none.

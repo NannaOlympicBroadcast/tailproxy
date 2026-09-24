@@ -37,6 +37,7 @@ const usage = `用法：tailproxy <命令> [参数]
   stop     停止后台服务
   status   查看服务状态
   token    打印持久化保存的访问令牌；加 --rotate 生成新令牌（重启服务后生效）
+  service  install / uninstall：安装为 systemd 服务并开机自启（见 tailproxy service -h）
   version  打印版本
 
 start / run 的参数：
@@ -69,6 +70,8 @@ func main() {
 		err = cmdStatus(args)
 	case "token":
 		err = cmdToken(args)
+	case "service":
+		err = cmdService(args)
 	case "version", "--version", "-version":
 		fmt.Println(version)
 	case "help", "-h", "--help":
@@ -222,6 +225,11 @@ func cmdRun(args []string) (err error) {
 	defer ln.Close()
 
 	st := service.State{PID: os.Getpid(), URL: p.URL(), Config: f.config, TokenEnv: p.TokenEnv(), TokenFile: p.TokenFile(), Started: time.Now()}
+	underSystemd := service.UnderSystemd()
+	if underSystemd {
+		st.Manager = "systemd"
+		st.UserUnit = os.Getenv("TAILPROXY_USER_UNIT") == "1"
+	}
 	if f.child {
 		st.Log = f.paths.Log
 	}
@@ -244,12 +252,22 @@ func cmdRun(args []string) (err error) {
 		readyW = nil
 		// The token is deliberately not written to the log.
 		log.Printf("tailproxy %s started in the background: pid %d, panel %s", version, st.PID, p.URL())
+	} else if underSystemd {
+		// stderr goes to the journal: never print the token there.
+		log.Printf("tailproxy %s started by systemd: pid %d, panel %s; token: run `tailproxy token` as the service user", version, st.PID, p.URL())
+		if err := service.Notify(fmt.Sprintf("READY=1\nSTATUS=panel %s", p.URL())); err != nil {
+			log.Printf("tailproxy: sd_notify: %v", err)
+		}
 	} else {
 		printBanner(os.Stderr, ready)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go func() {
+		<-ctx.Done()
+		service.Notify("STOPPING=1")
+	}()
 	if err := p.Serve(ctx, ln); err != nil {
 		return fmt.Errorf("panel: %w", err)
 	}
@@ -269,6 +287,9 @@ func cmdStop(args []string) error {
 	if st == nil {
 		fmt.Println("tailproxy 未在运行")
 		return nil
+	}
+	if st.Manager == "systemd" {
+		return fmt.Errorf("tailproxy（pid %d）由 systemd 管理，请使用：%s stop %s", st.PID, systemctlCmd(st.UserUnit), service.UnitName)
 	}
 	if err := service.Terminate(st.PID); err != nil {
 		return fmt.Errorf("停止 pid %d：%w", st.PID, err)
@@ -297,7 +318,10 @@ func cmdStatus(args []string) error {
 		return nil
 	}
 	mode := "前台"
-	if st.Log != "" {
+	switch {
+	case st.Manager == "systemd":
+		mode = "由 systemd 管理：" + systemctlCmd(st.UserUnit) + " status " + service.UnitName
+	case st.Log != "":
 		mode = "后台"
 	}
 	fmt.Printf("tailproxy 正在运行（%s）\n", mode)
@@ -389,4 +413,12 @@ func printBanner(w io.Writer, r service.Ready) {
 	default:
 		fmt.Fprintf(w, "  一次性令牌（--ephemeral-token）：没有保存，进程退出即失效\n\n")
 	}
+}
+
+// systemctlCmd is the systemctl invocation for a system or user unit.
+func systemctlCmd(userUnit bool) string {
+	if userUnit {
+		return "systemctl --user"
+	}
+	return "systemctl"
 }
