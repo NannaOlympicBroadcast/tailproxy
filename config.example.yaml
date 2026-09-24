@@ -42,8 +42,8 @@ capture:
 
 panel:
   listen: 127.0.0.1:7708            # Web 面板 + REST API + /metrics
-  tailnet: true                     # 同时通过 ts 槽位对 tailnet 开放（受 ACL 控制）
-  auth_token_env: TAILPROXY_PANEL_TOKEN   # 监听非回环地址时必填
+  tailnet: false                    # 通过 ts 槽位对 tailnet 开放（受 ACL 控制；尚未实现）
+  auth_token_env: TAILPROXY_PANEL_TOKEN   # 可选：固定令牌（≥16 字符）；未设置时每次启动随机生成并打印
 
 wireguard_ports: auto               # auto | 41642-41649
 

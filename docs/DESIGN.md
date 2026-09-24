@@ -240,7 +240,7 @@
 
 **出站**（防火墙必须放行）：TCP 443（控制面和 DERP 中继）、UDP 3478（STUN）、WireGuard UDP 源端口；TCP 80 可选（控制面回退、强制门户检测）[来源 S47]。
 
-**Web 面板安全**〔无来源·设计决策〕：默认只监听回环地址；如果要监听局域网地址，必须设置访问令牌或密码。更推荐只通过 tailnet 访问，这样可以复用 Tailscale 的身份认证和 ACL。
+**Web 面板安全**〔无来源·设计决策〕：所有 API 和 `/metrics` 始终需要访问令牌。未通过 `panel.auth_token_env` 指定固定令牌时，每次启动随机生成 32 字节令牌，并在终端打印面板地址、令牌和一键登录链接（令牌放在 URL 的 `#` 片段里，不会发送到服务器）；来自环境变量的令牌不在终端回显。默认只监听回环地址，并校验 `Host` 头以防 DNS 重绑定；写操作拒绝跨站请求。更推荐只通过 tailnet 访问，这样可以复用 Tailscale 的身份认证和 ACL。
 
 ---
 
@@ -290,8 +290,8 @@ capture:
 
 panel:
   listen: 127.0.0.1:7708            # Web 面板 + REST API + /metrics
-  tailnet: true                     # 同时通过 ts 槽位对 tailnet 开放（受 ACL 控制）
-  auth_token_env: TAILPROXY_PANEL_TOKEN   # 监听非回环地址时必填
+  tailnet: false                    # 通过 ts 槽位对 tailnet 开放（受 ACL 控制；尚未实现）
+  auth_token_env: TAILPROXY_PANEL_TOKEN   # 可选：固定令牌（≥16 字符）；未设置时每次启动随机生成并打印
 
 wireguard_ports: auto               # auto | 41642-41649
 

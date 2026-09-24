@@ -20,7 +20,25 @@
 ```sh
 go build -o tailproxy ./cmd/tailproxy
 ./tailproxy -c config.example.yaml
-# 浏览器打开 http://127.0.0.1:7708
+```
+
+启动时终端会打印面板地址和访问令牌：
+
+```
+tailproxy dev
+  面板地址：http://127.0.0.1:7708/（监听 127.0.0.1:7708）
+  访问令牌：<43 个字符的随机令牌>
+  一键登录：http://127.0.0.1:7708/#token=<43 个字符的随机令牌>
+  令牌在每次启动时随机生成，重启后失效；如需固定令牌，设置 panel.auth_token_env 指向的环境变量（至少 16 个字符）。
+```
+
+在浏览器里打开「一键登录」链接即可进入面板；也可以打开面板地址，再粘贴令牌登录。令牌保存在浏览器标签页的 sessionStorage 里，关闭标签页或点「退出」后需要重新登录。
+
+需要固定令牌（例如给 Prometheus 抓取 `/metrics` 用）时，设置 `panel.auth_token_env` 指向的环境变量。这时令牌不会在终端显示：
+
+```sh
+TAILPROXY_PANEL_TOKEN='至少16个字符的令牌' ./tailproxy -c config.example.yaml
+curl -H "Authorization: Bearer $TAILPROXY_PANEL_TOKEN" http://127.0.0.1:7708/metrics
 ```
 
 面板内容：
@@ -58,9 +76,12 @@ go build -o tailproxy ./cmd/tailproxy
 
 ### 访问控制
 
+- **所有 API 和 `/metrics` 都需要令牌**（`Authorization: Bearer <令牌>`），只有登录页本身的静态文件不需要。令牌用常数时间比较。
+- 随机令牌由 32 字节随机数生成，每次启动都不同，重启后旧令牌立即失效。一键登录链接把令牌放在 `#` 后面，这一部分不会发送给服务器，页面读取后会立即从地址栏移除。
+- 注意：随机令牌会打印到终端。如果用 systemd 等方式把输出写进日志，能读日志的人也能拿到令牌；这种情况建议改用环境变量设置固定令牌。
 - 默认只监听 `127.0.0.1:7708`，并且只接受回环地址的 `Host` 头，用来防御 DNS 重绑定攻击。
 - 所有写操作（保存规则、重新加载配置）都会拒绝跨站请求（检查 `Origin` 和 `Sec-Fetch-Site`），防止你浏览器里打开的其他网页偷偷改规则；保存规则还要求 `Content-Type: application/json`。
-- `panel.listen` 设为非回环地址时，必须在 `panel.auth_token_env` 指定的环境变量里设置令牌，否则拒绝启动。API 使用 `Authorization: Bearer <令牌>` 认证，页面会提示输入令牌。
+- `panel.listen` 可以设为局域网地址，访问同样需要令牌；这时不再校验 `Host` 头。
 - `panel.tailnet`（只对 tailnet 开放面板）依赖 `ts` 槽位，尚未实现；设置后启动时会打印警告，面板仍只监听 `panel.listen`。
 
 ## 测试

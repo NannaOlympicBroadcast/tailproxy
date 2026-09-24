@@ -4,6 +4,23 @@ const TOKEN_KEY = "tailproxy.panelToken";
 let token = "";
 try { token = sessionStorage.getItem(TOKEN_KEY) || ""; } catch (_) { /* storage unavailable */ }
 
+// One-click login link printed at startup: http://…/#token=<token>. The
+// fragment never reaches the server; take the token and drop it from the URL.
+(function takeTokenFromHash() {
+  const m = /^#token=(.+)$/.exec(location.hash);
+  if (!m) return;
+  token = decodeURIComponent(m[1]);
+  try { sessionStorage.setItem(TOKEN_KEY, token); } catch (_) { /* storage unavailable */ }
+  history.replaceState(null, "", location.pathname + location.search + "#overview");
+})();
+
+function saveToken(t) {
+  token = t;
+  try {
+    if (t) sessionStorage.setItem(TOKEN_KEY, t); else sessionStorage.removeItem(TOKEN_KEY);
+  } catch (_) { /* storage unavailable */ }
+}
+
 const $ = (id) => document.getElementById(id);
 
 function el(tag, text, cls) {
@@ -36,10 +53,18 @@ function showError(msg) {
   b.hidden = !msg;
 }
 
-function showLogin(show) {
+function showLogin(show, message) {
+  document.body.classList.toggle("locked", show);
   $("login").hidden = !show;
-  document.querySelectorAll(".tab").forEach((t) => { if (show) t.hidden = true; });
-  if (!show) selectTab(currentTab());
+  const err = $("login-error");
+  err.textContent = message || "";
+  err.hidden = !message;
+  if (show) {
+    $("token").value = "";
+    $("token").focus();
+  } else {
+    selectTab(currentTab());
+  }
 }
 
 function currentTab() {
@@ -84,7 +109,9 @@ async function loadStatus() {
   $("cfg-path").textContent = s.config_path;
   $("cfg-loaded").textContent = fmtTime(s.config_loaded);
   $("panel-listen").textContent = s.panel_listen;
-  $("auth").textContent = s.auth_enabled ? "已启用" : "未启用（仅回环地址可访问）";
+  $("auth").textContent = s.token_source === "generated"
+    ? "本次启动随机生成（重启后失效）"
+    : "来自环境变量 $" + s.token_source.replace(/^env:/, "");
   const tb = $("components");
   tb.replaceChildren();
   for (const c of s.components) {
@@ -158,25 +185,37 @@ async function loadConfig() {
   $("config-json").textContent = JSON.stringify(c, null, 2);
 }
 
+// authFailed is called when the server rejects the token. Unsaved rule edits
+// stay in memory and are still there after logging in again.
+function authFailed() {
+  const hadToken = !!token;
+  saveToken("");
+  showLogin(true, hadToken ? "令牌无效或已过期（tailproxy 重启后随机令牌会改变），请使用终端里最新打印的令牌。" : "");
+}
+
 async function refresh() {
+  if (!token) { showLogin(true); return; }
   try {
     await Promise.all([loadStatus(), loadEgress(), loadRules(), loadConfig()]);
     showError("");
     showLogin(false);
   } catch (err) {
-    if (err instanceof AuthError) {
-      showLogin(true);
-      return;
-    }
+    if (err instanceof AuthError) { authFailed(); return; }
     showError("加载失败：" + err.message);
   }
 }
 
 $("login").addEventListener("submit", (ev) => {
   ev.preventDefault();
-  token = $("token").value.trim();
-  try { sessionStorage.setItem(TOKEN_KEY, token); } catch (_) { /* storage unavailable */ }
+  saveToken($("token").value.trim());
   refresh();
+});
+
+$("logout").addEventListener("click", () => {
+  if (editing && dirty && !confirm("有未保存的规则修改，确定退出？")) return;
+  if (editing) stopEdit();
+  saveToken("");
+  showLogin(true);
 });
 
 $("reload").addEventListener("click", async () => {
@@ -216,7 +255,7 @@ $("test").addEventListener("submit", async (ev) => {
       el("div", "原因：" + r.reason, "muted"),
     );
   } catch (err) {
-    if (err instanceof AuthError) { showLogin(true); return; }
+    if (err instanceof AuthError) { authFailed(); return; }
     out.replaceChildren(el("span", "测试失败：" + err.message));
     if (err.details) out.append(errorList(err.details));
   }
@@ -418,7 +457,7 @@ async function saveRules() {
     $("edit-status").textContent = "";
     showSaved(`已保存 ${r.rules} 条规则，并已生效；旧配置备份在 ${r.backup}`);
   } catch (err) {
-    if (err instanceof AuthError) { showLogin(true); return; }
+    if (err instanceof AuthError) { authFailed(); return; }
     $("edit-status").textContent = "";
     showEditErrors(err.details || [err.message], err.status === 409);
   } finally {
@@ -451,6 +490,5 @@ window.addEventListener("beforeunload", (ev) => {
 });
 
 window.addEventListener("hashchange", () => { if ($("login").hidden) selectTab(currentTab()); });
-selectTab(currentTab());
 refresh();
 setInterval(() => { if ($("login").hidden && !document.hidden) loadStatus().catch(() => {}); }, 5000);

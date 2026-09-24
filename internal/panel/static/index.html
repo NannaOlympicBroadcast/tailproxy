@@ -6,7 +6,7 @@
 <title>tailproxy 面板</title>
 <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body class="locked">
 <header class="top">
   <div class="brand">tailproxy <span id="version" class="muted"></span></div>
   <nav>
@@ -15,15 +15,17 @@
     <a href="#rules" data-tab="rules">规则</a>
     <a href="#config" data-tab="config">配置</a>
   </nav>
+  <button id="logout" type="button" class="secondary">退出</button>
 </header>
 
 <main>
   <div id="error" class="banner error" hidden></div>
 
   <form id="login" class="card" hidden>
-    <h2>需要访问令牌</h2>
-    <p class="muted">面板启用了令牌认证，请输入配置项 <code>panel.auth_token_env</code> 所指定的环境变量中设置的令牌。</p>
-    <input id="token" type="password" autocomplete="current-password" placeholder="访问令牌" required>
+    <h2>登录 tailproxy 面板</h2>
+    <p class="muted">启动 tailproxy 时，终端会打印访问令牌和一键登录链接。打开那个链接即可自动登录，也可以把令牌粘贴到下面。如果设置了 <code>panel.auth_token_env</code>，令牌就是该环境变量的值。</p>
+    <input id="token" type="password" autocomplete="off" placeholder="访问令牌" required>
+    <p id="login-error" class="login-error" hidden></p>
     <button type="submit">登录</button>
   </form>
 
@@ -44,7 +46,7 @@
         <dt>配置文件</dt><dd id="cfg-path">—</dd>
         <dt>加载时间</dt><dd id="cfg-loaded">—</dd>
         <dt>面板监听</dt><dd id="panel-listen">—</dd>
-        <dt>令牌认证</dt><dd id="auth">—</dd>
+        <dt>访问令牌</dt><dd id="auth">—</dd>
       </dl>
       <button id="reload" type="button">重新加载配置</button>
       <span id="reload-msg" class="muted"></span>

@@ -7,6 +7,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -37,8 +38,23 @@ func main() {
 	if p.TailnetRequested() {
 		log.Printf("tailproxy: warning: panel.tailnet is not implemented yet (needs the ts egress slot); the panel only listens on %s", p.Addr())
 	}
-	log.Printf("tailproxy %s: web panel on http://%s", version, p.Addr())
+	printPanelBanner(os.Stderr, p)
 	if err := p.ListenAndServe(ctx); err != nil {
 		log.Fatalf("tailproxy: panel: %v", err)
 	}
+}
+
+// printPanelBanner prints how to reach the panel. A generated token is shown
+// in full because it is the only way to log in; a token taken from the
+// environment is not echoed, since the operator already has it.
+func printPanelBanner(w io.Writer, p *panel.Server) {
+	fmt.Fprintf(w, "\ntailproxy %s\n", version)
+	fmt.Fprintf(w, "  面板地址：%s（监听 %s）\n", p.URL(), p.Addr())
+	if env := p.TokenEnv(); env != "" {
+		fmt.Fprintf(w, "  访问令牌：来自环境变量 $%s（不在终端显示）\n\n", env)
+		return
+	}
+	fmt.Fprintf(w, "  访问令牌：%s\n", p.Token())
+	fmt.Fprintf(w, "  一键登录：%s\n", p.LoginURL())
+	fmt.Fprintf(w, "  令牌在每次启动时随机生成，重启后失效；如需固定令牌，设置 panel.auth_token_env 指向的环境变量（至少 %d 个字符）。\n\n", panel.MinTokenLen)
 }

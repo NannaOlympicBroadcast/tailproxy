@@ -4,8 +4,10 @@ package panel
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
 	"embed"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,7 +38,12 @@ type Server struct {
 	cfgPath string
 	version string
 	started time.Time
-	token   string
+
+	// token is always set: every API call needs it. tokenEnv names the
+	// environment variable it came from, or is empty when it was generated.
+	token    string
+	tokenEnv string
+	loopback bool // panel.listen is a loopback address
 
 	mu     sync.RWMutex
 	cfg    *config.Config
@@ -53,26 +60,72 @@ type Server struct {
 	ruleSaves     atomic.Uint64
 }
 
-// New loads the configuration at cfgPath and prepares the panel. The panel
-// token is read from the environment variable named by panel.auth_token_env.
-// A panel listening on a non-loopback address refuses to start without one.
+// MinTokenLen is the shortest fixed token accepted from the environment.
+const MinTokenLen = 16
+
+// New loads the configuration at cfgPath and prepares the panel. Access
+// always requires a token: the value of the environment variable named by
+// panel.auth_token_env if that is set and non-empty, otherwise a random token
+// generated for this run.
 func New(cfgPath, version string) (*Server, error) {
 	s := &Server{cfgPath: cfgPath, version: version, started: time.Now()}
 	if err := s.loadFromDisk(); err != nil {
 		return nil, err
 	}
 	cfg := s.cfg
-	if cfg.Panel.AuthTokenEnv != "" {
-		s.token = os.Getenv(cfg.Panel.AuthTokenEnv)
+	if env := cfg.Panel.AuthTokenEnv; env != "" {
+		if v := os.Getenv(env); v != "" {
+			if len(v) < MinTokenLen {
+				return nil, fmt.Errorf("panel token from $%s is shorter than %d characters", env, MinTokenLen)
+			}
+			s.token, s.tokenEnv = v, env
+		}
+	}
+	if s.token == "" {
+		t, err := generateToken()
+		if err != nil {
+			return nil, err
+		}
+		s.token = t
 	}
 	loopback, err := isLoopbackListen(cfg.Panel.Listen)
 	if err != nil {
 		return nil, err
 	}
-	if !loopback && s.token == "" {
-		return nil, fmt.Errorf("panel.listen %s is not a loopback address: set panel.auth_token_env and export a non-empty token", cfg.Panel.Listen)
-	}
+	s.loopback = loopback
 	return s, nil
+}
+
+// generateToken returns 32 random bytes, base64url-encoded (43 characters).
+func generateToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate panel token: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// Token returns the panel access token.
+func (s *Server) Token() string { return s.token }
+
+// TokenEnv returns the environment variable the token was read from, or ""
+// when the token was generated for this run.
+func (s *Server) TokenEnv() string { return s.tokenEnv }
+
+// URL returns a browser URL for the panel. An unspecified listen host
+// (0.0.0.0, ::, empty) is shown as 127.0.0.1.
+func (s *Server) URL() string {
+	host, port, _ := net.SplitHostPort(s.Addr())
+	if ip, err := netip.ParseAddr(host); host == "" || (err == nil && ip.IsUnspecified()) {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port) + "/"
+}
+
+// LoginURL returns URL with the token in the fragment. The fragment is never
+// sent to the server; the page reads it, stores it and removes it.
+func (s *Server) LoginURL() string {
+	return s.URL() + "#token=" + url.QueryEscape(s.token)
 }
 
 // Addr returns the configured listen address.
@@ -131,15 +184,14 @@ func (s *Server) Handler() http.Handler {
 }
 
 // hostGuard blocks DNS-rebinding attacks against a loopback-only panel by
-// only accepting loopback Host headers. With a token configured the token is
-// the access control and any Host is accepted.
+// only accepting loopback Host headers (defense in depth on top of the token).
 func (s *Server) hostGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.requests.Add(1)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		if s.token == "" && !isLoopbackHost(r.Host) {
+		if s.loopback && !isLoopbackHost(r.Host) {
 			http.Error(w, "forbidden host", http.StatusForbidden)
 			return
 		}
@@ -153,13 +205,11 @@ func (s *Server) hostGuard(next http.Handler) http.Handler {
 
 func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.token != "" {
-			got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if !ok || subtle.ConstantTimeCompare([]byte(got), []byte(s.token)) != 1 {
-				w.Header().Set("WWW-Authenticate", `Bearer realm="tailproxy"`)
-				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-				return
-			}
+		got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok || subtle.ConstantTimeCompare([]byte(got), []byte(s.token)) != 1 {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="tailproxy"`)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
 		}
 		h(w, r)
 	}
@@ -188,7 +238,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"config_path":    s.cfgPath,
 		"config_loaded":  loaded.UTC().Format(time.RFC3339),
 		"panel_listen":   cfg.Panel.Listen,
-		"auth_enabled":   s.token != "",
+		"token_source":   s.tokenSource(),
 		"rules":          engine.Len(),
 		"egress_slots":   slots,
 		"egress_groups":  groups,
@@ -342,9 +392,16 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	enc.Encode(v)
 }
 
+func (s *Server) tokenSource() string {
+	if s.tokenEnv != "" {
+		return "env:" + s.tokenEnv
+	}
+	return "generated"
+}
+
 // isCrossSite reports whether a state-changing request came from another
-// site. Without a token a loopback panel would otherwise accept requests that
-// any web page open in the user's browser can send to 127.0.0.1.
+// site: a page open in the user's browser that somehow obtained the token must
+// still not be able to drive the panel.
 func isCrossSite(r *http.Request) bool {
 	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
 		return true

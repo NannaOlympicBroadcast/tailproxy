@@ -44,9 +44,21 @@ func do(t *testing.T, h http.Handler, method, target, body string, hdr map[strin
 	return rec
 }
 
+// authed wraps the panel handler so requests carry the panel token unless
+// they set their own Authorization header.
+func authed(s *Server) http.Handler {
+	h := s.Handler()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			r.Header.Set("Authorization", "Bearer "+s.Token())
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
 func TestStaticAndStatus(t *testing.T) {
 	s, _ := newTestServer(t, testConfig)
-	h := s.Handler()
+	h := authed(s)
 	if rec := do(t, h, "GET", "/", "", nil); rec.Code != 200 || !strings.Contains(rec.Body.String(), "tailproxy") {
 		t.Fatalf("index: %d %q", rec.Code, rec.Body.String())
 	}
@@ -60,14 +72,14 @@ func TestStaticAndStatus(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil || rec.Code != 200 {
 		t.Fatalf("status: %d %v", rec.Code, err)
 	}
-	if st["rules"].(float64) != 2 || st["egress_slots"].(float64) != 2 || st["auth_enabled"] != false {
+	if st["rules"].(float64) != 2 || st["egress_slots"].(float64) != 2 || st["token_source"] != "generated" {
 		t.Fatalf("status = %v", st)
 	}
 }
 
 func TestRuleTestEndpoint(t *testing.T) {
 	s, _ := newTestServer(t, testConfig)
-	h := s.Handler()
+	h := authed(s)
 	tests := []struct {
 		body, target string
 		code         int
@@ -98,10 +110,11 @@ func TestHostGuardBlocksRebinding(t *testing.T) {
 	s, _ := newTestServer(t, testConfig)
 	req := httptest.NewRequest("GET", "/api/v1/status", nil)
 	req.Host = "evil.example:7708"
+	req.Header.Set("Authorization", "Bearer "+s.Token())
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
-		t.Fatalf("got %d, want 403", rec.Code)
+		t.Fatalf("got %d, want 403 even with a valid token", rec.Code)
 	}
 	for _, host := range []string{"localhost:7708", "[::1]:7708", "127.0.0.1"} {
 		if !isLoopbackHost(host) {
@@ -110,36 +123,82 @@ func TestHostGuardBlocksRebinding(t *testing.T) {
 	}
 }
 
-func TestTokenAuth(t *testing.T) {
-	t.Setenv("TP_TEST_TOKEN", "s3cret")
-	s, _ := newTestServer(t, testConfig+"panel: {listen: '0.0.0.0:7708', auth_token_env: TP_TEST_TOKEN}\n")
+func TestGeneratedTokenRequired(t *testing.T) {
+	s, _ := newTestServer(t, testConfig)
+	if len(s.Token()) != 43 || s.TokenEnv() != "" {
+		t.Fatalf("token %q (env %q), want a generated 43-char token", s.Token(), s.TokenEnv())
+	}
+	s2, _ := newTestServer(t, testConfig)
+	if s2.Token() == s.Token() {
+		t.Fatal("generated tokens must differ per start")
+	}
 	h := s.Handler()
-	if rec := do(t, h, "GET", "/api/v1/status", "", nil); rec.Code != 401 {
-		t.Fatalf("no token: %d", rec.Code)
+	for _, path := range []string{"/api/v1/status", "/api/v1/rules", "/api/v1/config", "/api/v1/egress", "/metrics"} {
+		if rec := do(t, h, "GET", path, "", nil); rec.Code != 401 {
+			t.Fatalf("%s without token: %d", path, rec.Code)
+		}
+		if rec := do(t, h, "GET", path, "", map[string]string{"Authorization": "Bearer " + s2.Token()}); rec.Code != 401 {
+			t.Fatalf("%s with another run's token: %d", path, rec.Code)
+		}
 	}
-	if rec := do(t, h, "GET", "/metrics", "", map[string]string{"Authorization": "Bearer wrong"}); rec.Code != 401 {
-		t.Fatalf("wrong token: %d", rec.Code)
+	if rec := do(t, h, "PUT", "/api/v1/rules", `{"revision":"x","rules":[]}`, jsonHdr); rec.Code != 401 {
+		t.Fatalf("save without token: %d", rec.Code)
 	}
-	rec := do(t, h, "GET", "/metrics", "", map[string]string{"Authorization": "Bearer s3cret"})
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "tailproxy_rules 2") {
-		t.Fatalf("metrics: %d %s", rec.Code, rec.Body.String())
+	if rec := do(t, h, "POST", "/api/v1/rules/test", `{"domain":"a.com"}`, nil); rec.Code != 401 {
+		t.Fatalf("rule test without token: %d", rec.Code)
+	}
+	if rec := do(t, authed(s), "GET", "/api/v1/status", "", nil); rec.Code != 200 {
+		t.Fatalf("with token: %d", rec.Code)
 	}
 	if rec := do(t, h, "GET", "/", "", nil); rec.Code != 200 {
-		t.Fatalf("static page should not need a token: %d", rec.Code)
+		t.Fatalf("static login page should not need a token: %d", rec.Code)
+	}
+	if got := s.LoginURL(); got != "http://127.0.0.1:7708/#token="+s.Token() {
+		t.Fatalf("LoginURL = %q", got)
 	}
 }
 
-func TestNonLoopbackRequiresToken(t *testing.T) {
+func TestEnvToken(t *testing.T) {
+	t.Setenv("TP_TEST_TOKEN", "0123456789abcdef-fixed")
+	s, _ := newTestServer(t, testConfig+"panel: {listen: '0.0.0.0:7708', auth_token_env: TP_TEST_TOKEN}\n")
+	if s.Token() != "0123456789abcdef-fixed" || s.TokenEnv() != "TP_TEST_TOKEN" {
+		t.Fatalf("token %q env %q", s.Token(), s.TokenEnv())
+	}
+	if s.URL() != "http://127.0.0.1:7708/" {
+		t.Fatalf("URL for unspecified listen = %q", s.URL())
+	}
+	h := s.Handler()
+	// Non-loopback listen: any Host is fine, the token is the access control.
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	req.Host = "192.168.1.10:7708"
+	req.Header.Set("Authorization", "Bearer 0123456789abcdef-fixed")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "tailproxy_rules 2") {
+		t.Fatalf("metrics: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestEnvTokenUnsetFallsBackToGenerated(t *testing.T) {
+	t.Setenv("TP_TEST_TOKEN", "")
+	s, _ := newTestServer(t, testConfig+"panel: {auth_token_env: TP_TEST_TOKEN}\n")
+	if s.TokenEnv() != "" || len(s.Token()) != 43 {
+		t.Fatalf("token %q env %q", s.Token(), s.TokenEnv())
+	}
+}
+
+func TestShortEnvTokenRejected(t *testing.T) {
+	t.Setenv("TP_TEST_TOKEN", "short")
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	os.WriteFile(path, []byte("panel: {listen: '0.0.0.0:7708'}\n"), 0o600)
-	if _, err := New(path, "test"); err == nil || !strings.Contains(err.Error(), "not a loopback") {
+	os.WriteFile(path, []byte("panel: {auth_token_env: TP_TEST_TOKEN}\n"), 0o600)
+	if _, err := New(path, "test"); err == nil || !strings.Contains(err.Error(), "shorter than") {
 		t.Fatalf("got %v", err)
 	}
 }
 
 func TestReload(t *testing.T) {
 	s, path := newTestServer(t, testConfig)
-	h := s.Handler()
+	h := authed(s)
 	os.WriteFile(path, []byte(testConfig+"  - {final: jp}\n"), 0o600)
 	if rec := do(t, h, "POST", "/api/v1/config/reload", "", nil); rec.Code != 200 {
 		t.Fatalf("reload: %d %s", rec.Code, rec.Body.String())
@@ -173,7 +232,7 @@ var jsonHdr = map[string]string{"Content-Type": "application/json"}
 func TestSaveRules(t *testing.T) {
 	cfg := "# keep this comment\n" + testConfig + "panel:\n  listen: 127.0.0.1:7708   # aligned comment\n"
 	s, path := newTestServer(t, cfg)
-	h := s.Handler()
+	h := authed(s)
 	rev := getRevision(t, h)
 	body := `{"revision":"` + rev + `","rules":[{"domain_suffix":["example.org"],"egress":"jp"},{"final":"us"}]}`
 	rec := do(t, h, "PUT", "/api/v1/rules", body, jsonHdr)
@@ -204,7 +263,7 @@ func TestSaveRules(t *testing.T) {
 
 func TestSaveRulesConflictWhenFileEditedOnDisk(t *testing.T) {
 	s, path := newTestServer(t, testConfig)
-	h := s.Handler()
+	h := authed(s)
 	rev := getRevision(t, h)
 	os.WriteFile(path, []byte(testConfig+"  - {final: jp}\n"), 0o600)
 	rec := do(t, h, "PUT", "/api/v1/rules", `{"revision":"`+rev+`","rules":[]}`, jsonHdr)
@@ -218,7 +277,7 @@ func TestSaveRulesConflictWhenFileEditedOnDisk(t *testing.T) {
 
 func TestSaveRulesValidation(t *testing.T) {
 	s, path := newTestServer(t, testConfig)
-	h := s.Handler()
+	h := authed(s)
 	rev := getRevision(t, h)
 	cases := []struct {
 		body string
@@ -248,7 +307,7 @@ func TestSaveRulesValidation(t *testing.T) {
 
 func TestCrossSiteWritesRefused(t *testing.T) {
 	s, _ := newTestServer(t, testConfig)
-	h := s.Handler()
+	h := authed(s)
 	rev := getRevision(t, h)
 	body := `{"revision":"` + rev + `","rules":[]}`
 	for _, hdr := range []map[string]string{
@@ -270,7 +329,7 @@ func TestCrossSiteWritesRefused(t *testing.T) {
 
 func TestRuleTestWithDraft(t *testing.T) {
 	s, _ := newTestServer(t, testConfig)
-	h := s.Handler()
+	h := authed(s)
 	rec := do(t, h, "POST", "/api/v1/rules/test", `{"domain":"chat.openai.com","rules":[{"domain_keyword":["openai"],"egress":"jp"}]}`, nil)
 	if !strings.Contains(rec.Body.String(), `"target": "jp"`) {
 		t.Fatalf("draft: %s", rec.Body.String())
