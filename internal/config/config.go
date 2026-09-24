@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"net/url"
 	"os"
 	"strings"
 
@@ -59,6 +60,9 @@ type Egress struct {
 	Type        string       `yaml:"type,omitempty" json:"type,omitempty"`
 	Members     []string     `yaml:"members,omitempty" json:"members,omitempty"`
 	HealthCheck *HealthCheck `yaml:"health_check,omitempty" json:"health_check,omitempty"`
+	// DoH overrides dns.per_egress_doh for this slot, e.g. a resolver that
+	// works well from the exit node's country. The host must be an IP.
+	DoH string `yaml:"doh,omitempty" json:"doh,omitempty"`
 }
 
 // IsGroup reports whether e is a group of other egress slots.
@@ -180,6 +184,9 @@ func (c *Config) Validate() error {
 			}
 			slots[e.Name] = true
 		case "fallback", "latency":
+			if e.DoH != "" {
+				errs = append(errs, fmt.Errorf("egress %q: doh is set per slot, not on a group", e.Name))
+			}
 			if e.ExitNode != "" {
 				errs = append(errs, fmt.Errorf("egress %q: a group cannot set exit_node", e.Name))
 			}
@@ -238,10 +245,38 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	for _, e := range c.Egress {
+		if e.DoH != "" {
+			if err := checkDoHURL(e.DoH); err != nil {
+				errs = append(errs, fmt.Errorf("egress %q: doh: %w", e.Name, err))
+			}
+		}
+	}
+	if c.DNS.PerEgressDoH != "" {
+		if err := checkDoHURL(c.DNS.PerEgressDoH); err != nil {
+			errs = append(errs, fmt.Errorf("dns.per_egress_doh: %w", err))
+		}
+	}
 	if _, _, err := net.SplitHostPort(c.Panel.Listen); err != nil {
 		errs = append(errs, fmt.Errorf("panel.listen: %w", err))
 	}
 	return errors.Join(errs...)
+}
+
+// checkDoHURL requires https:// with an IP-literal host, so resolving a name
+// through an exit node never needs a lookup outside that exit node.
+func checkDoHURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("%q must use https://", raw)
+	}
+	if _, err := netip.ParseAddr(u.Hostname()); err != nil {
+		return fmt.Errorf("%q: the host must be an IP address (e.g. https://1.1.1.1/dns-query)", raw)
+	}
+	return nil
 }
 
 // ParsePrefix accepts a CIDR prefix or a bare IP address (treated as /32 or /128).

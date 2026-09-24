@@ -44,6 +44,9 @@ type Component struct {
 type Runtime interface {
 	Components() []Component
 	Egress() any
+	// ExitNodes lists the exit nodes offered in the tailnet (nil before
+	// any slot has logged in).
+	ExitNodes(ctx context.Context) (any, error)
 	Connections() any
 }
 
@@ -370,7 +373,13 @@ func (s *Server) handleEgress(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"configured": cfg.Egress, "runtime": nil, "detail": egressNotRunning})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"configured": cfg.Egress, "runtime": s.runtime.Egress()})
+	resp := map[string]any{"configured": cfg.Egress, "runtime": s.runtime.Egress()}
+	if nodes, err := s.runtime.ExitNodes(r.Context()); err != nil {
+		resp["exit_nodes_error"] = err.Error()
+	} else {
+		resp["exit_nodes"] = nodes
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request) {

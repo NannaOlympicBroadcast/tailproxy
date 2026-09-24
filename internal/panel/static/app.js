@@ -139,6 +139,7 @@ async function loadEgress() {
   const e = await api("/api/v1/egress");
   $("egress-detail").textContent = e.detail || "";
   $("egress-detail").hidden = !e.detail;
+  renderExitNodes(e);
   const rt = {};
   for (const r of e.runtime || []) rt[r.name] = r;
   const tb = $("egress-list");
@@ -180,6 +181,27 @@ async function loadEgress() {
       info.append(el("div", h.ok ? `健康 ✓ ${h.rtt_ms.toFixed(0)} ms` : `健康 ✗ ${h.error || ""}`));
     }
     tr.append(info);
+    tb.append(tr);
+  }
+}
+
+function renderExitNodes(e) {
+  const tb = $("exit-nodes");
+  tb.replaceChildren();
+  const msg = (text) => { const tr = el("tr"); const td = el("td", text, "muted"); td.colSpan = 5; tr.append(td); tb.append(tr); };
+  if (e.exit_nodes_error) return msg("读取失败：" + e.exit_nodes_error);
+  if (!e.exit_nodes) return msg("还没有槽位登录到 tailnet，登录后这里会列出可用的出口节点");
+  if (!e.exit_nodes.length) return msg("tailnet 中没有已批准的出口节点（需要 --advertise-exit-node 并在管理后台批准）");
+  for (const n of e.exit_nodes) {
+    const tr = el("tr");
+    const name = el("td");
+    name.append(el("div", n.name));
+    if (n.hostname && n.hostname !== n.name) name.append(el("div", n.hostname, "muted"));
+    tr.append(name);
+    tr.append(el("td", (n.tailscale_ips || []).join(" ")));
+    tr.append(el("td", [n.os, n.country].filter(Boolean).join(" / ") || "—"));
+    const on = el("td"); on.append(el("span", n.online ? "在线" : "离线", "state " + (n.online ? "ready" : "exit_node_offline"))); tr.append(on);
+    tr.append(el("td", (n.used_by || []).join(", ") || "—"));
     tb.append(tr);
   }
 }

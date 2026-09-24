@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/egress"
@@ -33,5 +34,13 @@ func (r *runtimeView) Components() []panel.Component {
 }
 
 func (r *runtimeView) Egress() any { return r.egress.Status() }
+
+func (r *runtimeView) ExitNodes(ctx context.Context) (any, error) {
+	nodes, err := r.egress.ExitNodes(ctx)
+	if nodes == nil || err != nil {
+		return nil, err
+	}
+	return nodes, nil
+}
 
 func (r *runtimeView) Connections() any { return r.tracker.Snapshot() }

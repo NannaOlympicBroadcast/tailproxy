@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -89,7 +90,11 @@ func New(cfg *config.Config, stateDir string, logf func(string, ...any)) (*Manag
 				}
 			},
 		}
-		m.slots[name] = newSlot(name, e.ExitNode, srv, cfg.DNS.PerEgressDoH, logf)
+		doh := cfg.DNS.PerEgressDoH
+		if e.DoH != "" {
+			doh = e.DoH
+		}
+		m.slots[name] = newSlot(name, e.ExitNode, srv, doh, logf)
 	}
 	for _, e := range cfg.Egress {
 		if !e.IsGroup() {
@@ -262,4 +267,65 @@ func (m *Manager) Summary() (state, detail string) {
 		state = "degraded"
 	}
 	return state, fmt.Sprintf("%d/%d 个出口槽位就绪", ready, len(m.slots))
+}
+
+// ExitNode is an exit node offered in the tailnet, as seen by a slot.
+type ExitNode struct {
+	Name    string   `json:"name"` // MagicDNS name, or hostname
+	Host    string   `json:"hostname"`
+	ID      string   `json:"id"`
+	IPs     []string `json:"tailscale_ips"`
+	OS      string   `json:"os,omitempty"`
+	Online  bool     `json:"online"`
+	UsedBy  []string `json:"used_by,omitempty"` // slots using it
+	Country string   `json:"country,omitempty"` // Mullvad and other located nodes
+}
+
+// ExitNodes lists the approved exit nodes in the tailnet, using the first
+// slot that is connected. It returns nil when no slot is logged in yet.
+func (m *Manager) ExitNodes(ctx context.Context) ([]ExitNode, error) {
+	var from *Slot
+	for _, name := range m.order {
+		if s, ok := m.slots[name]; ok && s.tailnetUp() {
+			from = s
+			break
+		}
+	}
+	if from == nil {
+		return nil, nil
+	}
+	lc, err := from.srv.LocalClient()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	ts, err := lc.Status(ctx)
+	if err != nil {
+		return nil, err
+	}
+	used := map[string][]string{}
+	for _, name := range m.order {
+		if s, ok := m.slots[name]; ok {
+			if id := s.Status().ExitNode.ID; id != "" {
+				used[id] = append(used[id], name)
+			}
+		}
+	}
+	var out []ExitNode
+	for _, p := range ts.Peer {
+		if !p.ExitNodeOption {
+			continue
+		}
+		e := ExitNode{Name: peerName(p), Host: p.HostName, ID: string(p.ID), OS: p.OS, Online: p.Online, UsedBy: used[string(p.ID)]}
+		for _, ip := range p.TailscaleIPs {
+			e.IPs = append(e.IPs, ip.String())
+		}
+		if p.Location != nil {
+			e.Country = p.Location.Country
+		}
+		out = append(out, e)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
 }

@@ -61,6 +61,11 @@
       <p class="muted">每个槽位是一个独立的 tailnet 设备（主机名 tailproxy-&lt;名称&gt;），固定使用一个出口节点。没有配置 auth key 时，需要打开登录链接把它加入你的 tailnet。</p>
       <table><thead><tr><th>名称</th><th>类型</th><th>出口节点 / 成员</th><th>状态</th><th>设备 / 健康</th></tr></thead><tbody id="egress-list"></tbody></table>
     </div>
+    <div class="card">
+      <h2>tailnet 中可用的出口节点</h2>
+      <p class="muted">由已登录的槽位读取。把「名称」或 IP 填到配置里对应出口的 <code>exit_node</code>，重启后生效。</p>
+      <table><thead><tr><th>名称</th><th>Tailscale IP</th><th>系统</th><th>在线</th><th>被使用</th></tr></thead><tbody id="exit-nodes"></tbody></table>
+    </div>
   </section>
 
   <section id="connections" class="tab" hidden>

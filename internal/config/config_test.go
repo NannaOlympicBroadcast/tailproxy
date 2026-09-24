@@ -49,6 +49,9 @@ func TestValidateErrors(t *testing.T) {
 		{"final with conditions", "rules: [{domain: [a.com], final: direct}]", "cannot have match conditions"},
 		{"bad cidr", "rules: [{ip_cidr: [300.0.0.0/8], egress: direct}]", "invalid ip_cidr"},
 		{"bad listen", "panel: {listen: '7708'}", "panel.listen"},
+		{"doh hostname", "egress: [{name: cn, exit_node: x, doh: 'https://dns.alidns.com/dns-query'}]", "must be an IP"},
+		{"doh http", "dns: {per_egress_doh: 'http://1.1.1.1/dns-query'}", "https://"},
+		{"doh on group", "egress: [{name: a, exit_node: x}, {name: g, type: fallback, members: [a], doh: 'https://1.1.1.1/dns-query'}]", "per slot"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
