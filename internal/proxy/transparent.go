@@ -25,7 +25,10 @@ type Transparent struct {
 	SniffTimeout time.Duration
 	// ListenPort is the TPROXY port; direct connections to it are refused.
 	ListenPort uint16
-	Logf       func(string, ...any)
+	// BlockDomain, if set, refuses connections to listed names (public DoH
+	// endpoints seen in SNI, DESIGN §4.8 L2).
+	BlockDomain func(string) bool
+	Logf        func(string, ...any)
 }
 
 func (t *Transparent) logf(format string, args ...any) {
@@ -103,6 +106,19 @@ func (t *Transparent) handle(ctx context.Context, client net.Conn) {
 		}
 	}
 
+	t.Router.Tracker.bypass.observe(d)
+	if d.Domain != "" && t.BlockDomain != nil && t.BlockDomain(d.Domain) {
+		c := &Conn{Inbound: "tproxy", Source: source, Host: d.Domain, Port: d.Port, DomainSrc: d.DomainSrc, ECH: d.ECH,
+			RuleIndex: -1, Target: "reject", Reason: "DoH endpoint (dns.anti_bypass.block_doh)"}
+		if d.IP.IsValid() {
+			c.DestIP = d.IP.String()
+		}
+		t.Router.Tracker.add(c)
+		t.Router.Tracker.bypass.dohBlocked.Add(1)
+		t.Router.Tracker.finish(c, "blocked: public DoH endpoint")
+		in.Close()
+		return
+	}
 	target, c, err := t.Router.ConnectDest(ctx, "tproxy", source, d)
 	if err != nil {
 		in.Close()

@@ -44,6 +44,9 @@ type Server struct {
 	// Upstreams are ip:port resolvers queried in order.
 	Upstreams []string
 	Canary    bool
+	// Block, if set, makes listed names (public DoH endpoints, DESIGN §4.8
+	// L2) answer NXDOMAIN.
+	Block func(name string) bool
 	// TTL of fake answers, in seconds (default 10). Short, so clients ask
 	// again soon after a rule change.
 	TTL uint32
@@ -52,7 +55,7 @@ type Server struct {
 	Dialer net.Dialer
 	Logf   func(string, ...any)
 
-	Queries, Fake, Forwarded, Failed, CanaryHits atomic.Int64
+	Queries, Fake, Forwarded, Failed, CanaryHits, Blocked atomic.Int64
 }
 
 func (s *Server) logf(format string, args ...any) {
@@ -178,6 +181,10 @@ func (s *Server) handle(ctx context.Context, q []byte, tcp bool) []byte {
 
 	if s.Canary && name == CanaryDomain {
 		s.CanaryHits.Add(1)
+		return reply(hdr, &question, dnsmessage.RCodeNameError, nil)
+	}
+	if s.Block != nil && s.Block(name) {
+		s.Blocked.Add(1)
 		return reply(hdr, &question, dnsmessage.RCodeNameError, nil)
 	}
 	if s.Pool != nil && question.Class == dnsmessage.ClassINET && s.Rules != nil && s.Rules().DomainMayRoute(name) {

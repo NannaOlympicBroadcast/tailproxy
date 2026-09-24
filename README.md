@@ -246,6 +246,13 @@ dns:
 - 发往 FakeIP 的 UDP（如 QUIC）会立刻返回「不可达」，应用会马上改用 TCP。目前只代理 TCP。
 - `use-application-dns.net` 返回 NXDOMAIN，让 Firefox 关闭默认开启的 DoH。
 - 发往 FakeIP 的 HTTPS / SVCB 记录返回空，防止客户端用记录里的 IP 提示或 ECH 配置绕开 FakeIP。
+- **封堵加密 DNS 通道（DESIGN §4.8 L2，默认开启）**：应用自己用 DoH 解析时，tailproxy 的 DNS 看不到查询，FakeIP 就拿不到域名。所以：
+  - 公开 DoH 端点的域名在 DNS 阶段返回 NXDOMAIN；
+  - 被捕获的连接如果 SNI 是 DoH 端点，直接拒绝；
+  - DoH 服务器 IP 的 443 端口和 DoT / DoQ 的 853 端口，由 nft 立即回 RST 或拒绝，本机和局域网的流量都一样处理。
+
+  这样应用会退回系统 DNS。名单来自公开的 [DoH-IP-blocklists](https://github.com/dibdot/DoH-IP-blocklists)，当前约 1362 个域名、2014 个 IPv4 地址、1373 个 IPv6 地址：启动后下载，之后每 12 小时更新一次；缓存在状态目录的 `doh-lists.txt`，下载失败时沿用缓存或内置的主流提供方。`doh_allow` 可以加白名单，`block_doh: false` / `block_dot_doq: false` 可以关闭。tailproxy 自己经出口做的 DoH 走 tsnet，不经过内核，不受影响。
+- **可见度统计（L0）**：面板「连接」页会统计透明捕获连接的域名来源（FakeIP / SNI / 未知）、带 ECH 的连接数和拦截的 DoH 次数，并列出「域名未知」最多的目的地，直接给出旁路影响有多大。
 
 防回环：Tailscale 在 Linux 上以 root 运行时，会给自己的套接字打 `SO_MARK 0x80000`（`tailscale.com/net/netns`），tsnet 同样如此。tailproxy 的直连和上游 DNS 查询也打这个标记，nft 规则会放过带这个标记的包，所以既不会回环，也不会把 tsnet 自己的 WireGuard 流量再抓回来。
 
@@ -253,7 +260,7 @@ dns:
 
 **要求**：root；nftables（`nft` 命令）；内核支持 `nft_tproxy` / `nft_socket`（OpenWrt：`opkg install nftables kmod-nft-tproxy kmod-nft-socket`）。策略路由直接通过 netlink 设置，不依赖 `ip` 命令。IPv6 被禁用的主机会自动只用 IPv4。
 
-**验证情况**：`internal/capture` 的集成测试在独立的网络命名空间里跑真实的 nftables TPROXY，覆盖以下内容：DNS 劫持得到 FakeIP；FakeIP 连接按域名交给出口；`ip_cidr` + Host 嗅探；某个端口走 direct 的 FakeIP 域名（带绕行标记、用上游解析，不会再拿到 FakeIP）；UDP 到 FakeIP 立即不可达；all 模式；清理后无残留。还没有在真实路由器或局域网客户端上验证。
+**验证情况**：`internal/capture` 的集成测试在独立的网络命名空间里跑真实的 nftables TPROXY，覆盖以下内容：DNS 劫持得到 FakeIP；FakeIP 连接按域名交给出口；`ip_cidr` + Host 嗅探；某个端口走 direct 的 FakeIP 域名（带绕行标记、用上游解析，不会再拿到 FakeIP）；UDP 到 FakeIP 立即不可达；DoH 域名 NXDOMAIN；DoH IP 的 443 和 853 端口立即 RST；带绕行标记的连接不被拦；SNI 为 DoH 端点的连接被拒；all 模式；清理后无残留。还没有在真实路由器或局域网客户端上验证。
 
 ### API
 

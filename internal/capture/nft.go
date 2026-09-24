@@ -56,6 +56,11 @@ type Options struct {
 	FakeIP []netip.Prefix
 	// Exclude are never captured and win over Route (capture.exclude_cidr).
 	Exclude []netip.Prefix
+	// DoHAddrs are public DoH resolvers: TCP/UDP 443 to them is refused
+	// (DESIGN §4.8 L2). BlockDoTDoQ refuses TCP/UDP 853. Both apply to
+	// local and forwarded traffic, except tailproxy's own (bypass mark).
+	DoHAddrs    []netip.Addr
+	BlockDoTDoQ bool
 }
 
 func split(ps []netip.Prefix) (v4, v6 []string) {
@@ -164,6 +169,34 @@ func Ruleset(o Options) (string, error) {
 		BypassMask, BypassMark,
 		RouteMark, RouteMark,
 		allScope(o.Scope, fmt.Sprintf("meta mark set %#x return", RouteMark)))
+
+	if len(o.DoHAddrs) > 0 || o.BlockDoTDoQ {
+		var d4, d6 []string
+		for _, a := range o.DoHAddrs {
+			if a.Is4() {
+				d4 = append(d4, a.String())
+			} else {
+				d6 = append(d6, a.String())
+			}
+		}
+		set(&b, "doh4", "ipv4_addr", d4)
+		set(&b, "doh6", "ipv6_addr", d6)
+		for _, hook := range []string{"output", "forward"} {
+			fmt.Fprintf(&b, "\n\tchain block_%s {\n\t\ttype filter hook %s priority filter; policy accept;\n", hook, hook)
+			fmt.Fprintf(&b, "\t\tmeta mark & %#x == %#x return\n", BypassMask, BypassMark)
+			if len(o.DoHAddrs) > 0 {
+				b.WriteString("\t\tip daddr @doh4 tcp dport 443 counter reject with tcp reset\n")
+				b.WriteString("\t\tip6 daddr @doh6 tcp dport 443 counter reject with tcp reset\n")
+				b.WriteString("\t\tip daddr @doh4 udp dport 443 counter reject\n")
+				b.WriteString("\t\tip6 daddr @doh6 udp dport 443 counter reject\n")
+			}
+			if o.BlockDoTDoQ {
+				b.WriteString("\t\ttcp dport 853 counter reject with tcp reset\n")
+				b.WriteString("\t\tudp dport 853 counter reject\n")
+			}
+			b.WriteString("\t}\n")
+		}
+	}
 
 	if o.DNSPort != 0 {
 		fmt.Fprintf(&b, `

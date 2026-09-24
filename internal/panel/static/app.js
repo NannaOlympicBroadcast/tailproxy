@@ -571,6 +571,18 @@ async function loadConnections() {
     return;
   }
   $("conn-summary").textContent = `活动 ${d.active.length} 条，累计 ${d.total} 条，失败 ${d.failed} 条（最近结束的保留 200 条）`;
+  const b = d.bypass || {};
+  const box = $("bypass");
+  box.replaceChildren();
+  if (b.transparent) {
+    const pct = (n) => `${n}（${Math.round((100 * n) / b.transparent)}%）`;
+    box.append(el("p", `透明捕获 ${b.transparent} 条：域名来自 FakeIP ${pct(b.fakeip)}，来自 SNI / Host ${pct(b.sniffed)}，域名未知 ${pct(b.unknown)}；带 ECH ${b.ech}，拦截 DoH ${b.doh_blocked}`));
+    if (b.top_unknown && b.top_unknown.length) {
+      box.append(el("p", "域名未知（只能按 IP 规则匹配）最多的目的地：" + b.top_unknown.slice(0, 8).map((x) => `${x.dest} ×${x.count}`).join("，"), "muted"));
+    }
+  } else {
+    box.append(el("p", "没有透明捕获的连接（capture.mode: tproxy 时统计）", "muted"));
+  }
   const a = $("conn-active"), r = $("conn-recent");
   a.replaceChildren();
   r.replaceChildren();

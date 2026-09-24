@@ -4,6 +4,7 @@ package capture_test
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +23,7 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/sys/unix"
 
+	"github.com/NannaOlympicBroadcast/tailproxy/internal/antibypass"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/capture"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/config"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/dnsserver"
@@ -155,6 +157,22 @@ func (e *testEgress) DialTailnet(context.Context, string, uint16) (net.Conn, str
 }
 
 func netnsTest(t *testing.T) {
+	// Handlers may still be running (and logging) when the test returns;
+	// t.Logf panics after that, so stop logging at the end.
+	var logMu sync.Mutex
+	logDone := false
+	logf := func(format string, args ...any) {
+		logMu.Lock()
+		defer logMu.Unlock()
+		if !logDone {
+			t.Logf(format, args...)
+		}
+	}
+	defer func() {
+		logMu.Lock()
+		logDone = true
+		logMu.Unlock()
+	}()
 	v6 := setupLoopback(t)
 	upstream := upstreamDNS(t)
 
@@ -185,7 +203,9 @@ func netnsTest(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	dns := &dnsserver.Server{Pool: pool, Rules: rules, Upstreams: []string{upstream}, Canary: true, Dialer: bypass, Logf: t.Logf}
+	doh := antibypass.New(nil)
+	dns := &dnsserver.Server{Pool: pool, Rules: rules, Upstreams: []string{upstream}, Canary: true, Dialer: bypass, Logf: logf,
+		Block: doh.BlockedDomain}
 	pc, dln, err := dnsserver.Listen("127.0.0.1:11053")
 	if err != nil {
 		t.Fatal(err)
@@ -196,13 +216,15 @@ func netnsTest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	in := &proxy.Transparent{Router: router, Pool: pool, ListenPort: tport, Logf: t.Logf}
+	in := &proxy.Transparent{Router: router, Pool: pool, ListenPort: tport, Logf: logf, BlockDomain: doh.BlockedDomain}
 	for _, ln := range lns {
 		go in.Serve(ctx, ln)
 	}
 
+	d4, d6 := doh.Addrs()
 	opts := capture.Options{Scope: capture.ScopeSelective, TProxyPort: tport, DNSPort: 11053,
-		FakeIP: pool.Prefixes(), Route: append(pool.Prefixes(), netip.MustParsePrefix("203.0.113.0/24"))}
+		FakeIP: pool.Prefixes(), Route: append(pool.Prefixes(), netip.MustParsePrefix("203.0.113.0/24")),
+		DoHAddrs: append(d4, d6...), BlockDoTDoQ: true}
 	if err := capture.Setup(opts); err != nil {
 		t.Fatal(err)
 	}
@@ -294,6 +316,38 @@ func netnsTest(t *testing.T) {
 	t.Logf("UDP to FakeIP refused after %v: %v", time.Since(start).Round(time.Millisecond), werr)
 	// TCP to the same FakeIP still works (checked above), so the rule is UDP-only.
 
+	// 6b. Anti-bypass (DESIGN §4.8 L2).
+	if _, err := sysResolver.LookupNetIP(ctx, "ip4", "mozilla.cloudflare-dns.com"); err == nil {
+		t.Fatal("DoH endpoint name resolved")
+	}
+	refused := func(what, addr string, control func(string, string, syscall.RawConn) error) error {
+		t.Helper()
+		d := net.Dialer{Timeout: 2 * time.Second, Control: control}
+		start := time.Now()
+		c, err := d.Dial("tcp", addr)
+		if c != nil {
+			c.Close()
+		}
+		t.Logf("%s (%s): %v after %v", what, addr, err, time.Since(start).Round(time.Millisecond))
+		return err
+	}
+	if err := refused("DoH IP 443", "1.1.1.1:443", nil); !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Fatalf("TCP 443 to a DoH resolver: want an immediate reset, got %v", err)
+	}
+	if err := refused("DoT 853", "192.0.2.9:853", nil); !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Fatalf("TCP 853: want an immediate reset, got %v", err)
+	}
+	if err := refused("DoH IP 443 with bypass mark", "1.1.1.1:443", capture.BypassControl); errors.Is(err, syscall.ECONNREFUSED) {
+		t.Fatal("tailproxy's own (marked) connection to a DoH resolver was blocked")
+	}
+	// SNI of a DoH endpoint on a captured address is refused.
+	tc, err := net.DialTimeout("tcp", fmt.Sprintf("203.0.113.8:%d", originPort), 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tls.Client(tc, &tls.Config{ServerName: "dns.google", InsecureSkipVerify: true}).Handshake()
+	tc.Close()
+
 	snap := tracker.Snapshot()
 	got := map[string]proxy.ConnView{}
 	for _, c := range snap.Recent {
@@ -315,6 +369,14 @@ func netnsTest(t *testing.T) {
 	}
 	if c := got["api.sniffed.test"]; c.DestIP != "203.0.113.7" {
 		t.Errorf("dest ip: %+v", c)
+	}
+	if c := got["dns.google"]; c.Target != "reject" || c.DomainSrc != "tls" || !strings.Contains(c.Error, "DoH") {
+		t.Errorf("DoH SNI: %+v", c)
+	}
+	b := snap.Bypass
+	t.Logf("bypass stats: %+v", b)
+	if b.Transparent < 4 || b.FakeIP < 2 || b.Sniffed < 2 || b.DoHBlocked != 1 || dns.Blocked.Load() == 0 {
+		t.Errorf("bypass stats: %+v dnsBlocked=%d", b, dns.Blocked.Load())
 	}
 
 	// 7. "all" scope: an address outside every rule is captured too and

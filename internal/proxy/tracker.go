@@ -57,6 +57,8 @@ type ConnView struct {
 
 // Tracker keeps active connections and the most recent finished ones.
 type Tracker struct {
+	bypass bypassStats
+
 	next   atomic.Uint64
 	total  atomic.Uint64
 	failed atomic.Uint64
@@ -117,6 +119,9 @@ type Snapshot struct {
 	Recent []ConnView `json:"recent"` // newest first
 	Total  uint64     `json:"total"`
 	Failed uint64     `json:"failed"`
+	// Bypass is DESIGN §4.8 L0: how often transparent capture could not
+	// see a domain, and where those connections went.
+	Bypass BypassView `json:"bypass"`
 }
 
 // Snapshot returns active connections (oldest first) and recent ones (newest first).
@@ -128,7 +133,7 @@ func (t *Tracker) Snapshot() Snapshot {
 	}
 	recent := append([]*Conn(nil), t.recent...)
 	t.mu.Unlock()
-	s := Snapshot{Active: []ConnView{}, Recent: []ConnView{}, Total: t.total.Load(), Failed: t.failed.Load()}
+	s := Snapshot{Active: []ConnView{}, Recent: []ConnView{}, Total: t.total.Load(), Failed: t.failed.Load(), Bypass: t.bypass.view()}
 	for _, c := range active {
 		s.Active = append(s.Active, c.view())
 	}

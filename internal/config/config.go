@@ -102,14 +102,34 @@ type FakeIP struct {
 	Inet6 string `yaml:"inet6" json:"inet6"`
 }
 
+// AntiBypass is DESIGN §4.8. Canary, BlockDoH and BlockDoTDoQ default to
+// on when unset (use the *On methods).
 type AntiBypass struct {
-	Canary       bool     `yaml:"canary" json:"canary"`
-	BlockDoH     bool     `yaml:"block_doh" json:"block_doh"`
+	Canary       *bool    `yaml:"canary,omitempty" json:"canary,omitempty"`
+	BlockDoH     *bool    `yaml:"block_doh,omitempty" json:"block_doh,omitempty"`
 	DoHLists     []string `yaml:"doh_lists" json:"doh_lists"`
 	DoHAllow     []string `yaml:"doh_allow" json:"doh_allow"`
-	BlockDoTDoQ  bool     `yaml:"block_dot_doq" json:"block_dot_doq"`
+	BlockDoTDoQ  *bool    `yaml:"block_dot_doq,omitempty" json:"block_dot_doq,omitempty"`
 	StripECH     string   `yaml:"strip_ech" json:"strip_ech"`
 	LearnRuleIPs bool     `yaml:"learn_rule_ips" json:"learn_rule_ips"`
+}
+
+func on(b *bool) bool { return b == nil || *b }
+
+// CanaryOn: answer use-application-dns.net with NXDOMAIN (default on).
+func (a AntiBypass) CanaryOn() bool { return on(a.Canary) }
+
+// BlockDoHOn: block public DoH endpoints by name and address (default on).
+func (a AntiBypass) BlockDoHOn() bool { return on(a.BlockDoH) }
+
+// BlockDoTDoQOn: refuse TCP/UDP 853 (default on).
+func (a AntiBypass) BlockDoTDoQOn() bool { return on(a.BlockDoTDoQ) }
+
+// DefaultDoHLists are the public DoH domain / IP lists (DESIGN S38).
+var DefaultDoHLists = []string{
+	"https://raw.githubusercontent.com/dibdot/DoH-IP-blocklists/master/doh-domains.txt",
+	"https://raw.githubusercontent.com/dibdot/DoH-IP-blocklists/master/doh-ipv4.txt",
+	"https://raw.githubusercontent.com/dibdot/DoH-IP-blocklists/master/doh-ipv6.txt",
 }
 
 // Capture modes.
