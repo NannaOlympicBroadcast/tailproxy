@@ -223,6 +223,25 @@
 - **扩展点**：① Rule Provider；② Capture 后端接口（`Capture` interface，新平台只需实现它）；③ 可选的「sing-box 配置导出」后端，用作 PoC 或对照。
 - **移动端**：Go 核心通过 gomobile 编译为 Android AAR / iOS xcframework，外层是平台原生 UI。〔无来源·待验证：iOS Network Extension 的内存上限能否容纳多个 tsnet 节点〕
 
+### 4.10 端口规划
+
+**监听端口**
+
+| 端口 | 协议 | 用途 | 是否必需 | 默认绑定 | 依据 |
+|---|---|---|---|---|---|
+| **708** | TCP | Web 面板，同时提供 REST API 和 `/metrics`（合并在一个端口，不另开 API / 指标端口） | 桌面 / 路由器：是；移动端使用原生 UI，不监听 | `127.0.0.1:708`；可选通过 `ts` 槽位的 tsnet `Listen` 只对 tailnet 开放，由 ACL 控制访问 | IANA 登记表中 708 为 Unassigned [来源 S44]；Linux 绑定 1024 以下端口需要 `CAP_NET_BIND_SERVICE` [来源 S45]；tsnet 支持 `Listen` [来源 S2][来源 S4]；绑定方式〔无来源·设计决策〕 |
+| 53 | UDP+TCP | 给局域网客户端的 DNS（FakeIP / 分流解析） | 仅路由器 / TPROXY 模式需要；TUN 模式在虚拟网卡内部劫持 DNS，不占主机端口 | 实际监听 `127.0.0.1:1053`，由 nft 把 53 重定向过来；路由器模式可直接监听 LAN 接口的 53 | 桌面 Linux 上 systemd-resolved 已占用 `127.0.0.53` / `127.0.0.54` 的 53 端口 [来源 S46]；IANA 53 = domain [来源 S44]；绑定方式〔无来源·设计决策〕 |
+| 7893 | TCP+UDP | TPROXY 透明代理入口 | 仅 Linux TPROXY 模式 | 只接收 nft 标记后送来的流量，不对外暴露 | TPROXY 需要一个设置了 `IP_TRANSPARENT` 的监听套接字 [来源 S10]；端口号〔无来源·设计决策〕 |
+| 1080 | TCP+UDP | SOCKS5 / HTTP 兜底入口 | 可选，默认关闭 | `127.0.0.1:1080` | IANA 1080 = socks [来源 S44] |
+| 41642–41649 | UDP | 各 tsnet 槽位的 WireGuard 端口，每个槽位一个 | 否：默认 `Port=0` 自动选择；只有在需要固定防火墙规则时才启用这个范围 | 所有接口 | tsnet `Port` 为 0 时自动选择 [来源 S4]；系统 tailscaled 默认使用 41641，所以从 41642 开始，避免冲突 [来源 S47] |
+| —— | Unix socket / 命名管道 | 本地 CLI 控制通道 | 是 | 仅本机 | 〔无来源·设计决策〕，不占 TCP 端口 |
+
+**入站**：正常情况下 Tailscale **不需要开放任何入站端口**，依靠 NAT 穿透即可；只有在网络环境比较差、直连失败时，才建议放行 WireGuard UDP 端口的入站，以减少走 DERP 中继的情况 [来源 S47]。
+
+**出站**（防火墙必须放行）：TCP 443（控制面和 DERP 中继）、UDP 3478（STUN）、WireGuard UDP 源端口；TCP 80 可选（控制面回退、强制门户检测）[来源 S47]。
+
+**Web 面板安全**〔无来源·设计决策〕：默认只监听回环地址；如果要监听局域网地址，必须设置访问令牌或密码。更推荐只通过 tailnet 访问，这样可以复用 Tailscale 的身份认证和 ACL。
+
 ---
 
 ## 5. 配置示例
@@ -265,7 +284,16 @@ dns:
 capture:
   mode: auto                        # auto | tun | tproxy | socks
   exclude_cidr: [100.64.0.0/10, fd7a:115c:a1e0::/48, 192.168.0.0/16]
-  socks_listen: 127.0.0.1:1080
+  socks_listen: 127.0.0.1:1080      # 可选，默认关闭
+  tproxy_port: 7893                 # 仅 Linux TPROXY
+  dns_listen: 127.0.0.1:1053        # 仅路由器 / TPROXY 模式
+
+panel:
+  listen: 127.0.0.1:708             # Web 面板 + REST API + /metrics
+  tailnet: true                     # 同时通过 ts 槽位对 tailnet 开放（受 ACL 控制）
+  auth_token_env: TAILPROXY_PANEL_TOKEN   # 监听非回环地址时必填
+
+wireguard_ports: auto               # auto | 41642-41649
 
 rules:
   - { domain_keyword: [openai, anthropic, claude], egress: us }
@@ -365,4 +393,8 @@ rules:
 | S41 | Chromium 策略定义 AdditionalDnsQueryTypesEnabled：https://chromium.googlesource.com/chromium/src/+/main/components/policy/resources/templates/policy_definitions/Miscellaneous/AdditionalDnsQueryTypesEnabled.yaml |
 | S42 | Zscaler – Encrypted Client Hello Is Here to Stay：https://www.zscaler.com/blogs/product-insights/encrypted-client-hello-ech-here-stay |
 | S43 | Chromium 策略定义 EncryptedClientHelloEnabled：https://chromium.googlesource.com/chromium/src/+/main/components/policy/resources/templates/policy_definitions/Miscellaneous/EncryptedClientHelloEnabled.yaml |
+| S44 | IANA Service Name and Transport Protocol Port Number Registry：https://www.iana.org/assignments/service-names-port-numbers/service-names-port-numbers.xhtml |
+| S45 | Linux capabilities(7) – CAP_NET_BIND_SERVICE：https://man7.org/linux/man-pages/man7/capabilities.7.html |
+| S46 | systemd-resolved.service(8)：https://man7.org/linux/man-pages/man8/systemd-resolved.service.8.html |
+| S47 | Tailscale Docs – What firewall ports should I open：https://tailscale.com/kb/1082/firewall-ports |
 | S27 | Apple TN3120 – Expected use cases for Network Extension packet tunnel providers：https://developer.apple.com/documentation/technotes/tn3120-expected-use-cases-for-network-extension-packet-tunnel-providers |
