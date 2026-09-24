@@ -142,3 +142,48 @@ func (r *compiled) matchDest(domain string, ip netip.Addr) (string, bool) {
 	}
 	return "", false
 }
+
+// DomainMayRoute reports whether some connection to domain could match a
+// rule whose target is not direct (DESIGN §4.6, selective mode): the DNS
+// module hands out a FakeIP only for such names and answers the rest with
+// real addresses, so their traffic never enters tailproxy. Rules are
+// scanned in order; a domain rule sending every port direct ends the scan.
+// IP-only rules are skipped here — they apply to real addresses, which
+// capture covers by prefix (see RoutedPrefixes).
+func (e *Engine) DomainMayRoute(domain string) bool {
+	domain = NormalizeDomain(domain)
+	for _, r := range e.rules {
+		if r.final {
+			return r.target != config.TargetDirect
+		}
+		hasDomainCond := r.exact != nil || len(r.suffixes) > 0 || len(r.keywords) > 0
+		if !hasDomainCond {
+			if len(r.prefixes) == 0 && r.target != config.TargetDirect {
+				return true // port-only rule: some port goes elsewhere
+			}
+			continue
+		}
+		if _, ok := r.matchDest(domain, netip.Addr{}); !ok {
+			continue
+		}
+		if r.target != config.TargetDirect {
+			return true
+		}
+		if r.ports == nil {
+			return false
+		}
+	}
+	return false
+}
+
+// RoutedPrefixes returns the ip_cidr prefixes of rules whose target is not
+// direct: in selective mode, capture takes these plus the FakeIP pools.
+func (e *Engine) RoutedPrefixes() []netip.Prefix {
+	var out []netip.Prefix
+	for _, r := range e.rules {
+		if r.target != config.TargetDirect {
+			out = append(out, r.prefixes...)
+		}
+	}
+	return out
+}

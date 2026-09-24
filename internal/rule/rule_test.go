@@ -80,3 +80,38 @@ func TestPortAndFinal(t *testing.T) {
 		t.Fatalf("explicit final: got %+v", r)
 	}
 }
+
+func TestDomainMayRoute(t *testing.T) {
+	e := mustEngine(t, []config.Rule{
+		{Domain: []string{"direct.example"}, Egress: config.TargetDirect},
+		{DomainSuffix: []string{"openai.com"}, Egress: "us"},
+		{DomainKeyword: []string{"google"}, Port: []uint16{443}, Egress: config.TargetDirect},
+		{DomainKeyword: []string{"google"}, Egress: "jp"},
+		{IPCIDR: []string{"203.0.113.0/24"}, Egress: "us"},
+		{DomainSuffix: []string{"corp.example"}, Egress: config.TargetReject},
+	})
+	for domain, want := range map[string]bool{
+		"chat.openai.com":  true,
+		"direct.example":   false, // first match: direct on all ports
+		"www.google.com":   true,  // 443 direct, other ports to jp
+		"x.corp.example":   true,  // reject counts: the proxy must see it
+		"unrelated.org":    false, // implicit final direct
+		"CHAT.OPENAI.COM.": true,
+	} {
+		if got := e.DomainMayRoute(domain); got != want {
+			t.Errorf("%s: got %v want %v", domain, got, want)
+		}
+	}
+	if p := e.RoutedPrefixes(); len(p) != 1 || p[0].String() != "203.0.113.0/24" {
+		t.Errorf("routed prefixes: %v", p)
+	}
+
+	portOnly := mustEngine(t, []config.Rule{{Port: []uint16{22}, Egress: "us"}})
+	if !portOnly.DomainMayRoute("anything.example") {
+		t.Error("port-only rule to an egress must capture every name")
+	}
+	finalEgress := mustEngine(t, []config.Rule{{Domain: []string{"a.example"}, Egress: config.TargetDirect}, {Final: "us"}})
+	if finalEgress.DomainMayRoute("a.example") || !finalEgress.DomainMayRoute("b.example") {
+		t.Error("final egress")
+	}
+}
