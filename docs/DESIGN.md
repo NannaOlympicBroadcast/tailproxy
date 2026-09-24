@@ -58,6 +58,7 @@
 - 修改 Tailscale 官方客户端或控制平面。
 - 让本机充当出口节点（advertise exit node）。
 - 按进程分流（放到 v2，各平台 API 差异较大）。
+- **TLS 中间人解密（MITM）**：永远不做，原因见 4.7。
 
 ---
 
@@ -122,7 +123,7 @@
 域名来源按优先级排列〔无来源·设计决策〕：
 1. **协议嗅探**：TLS ClientHello 中的 SNI、HTTP `Host` 头、QUIC Initial 中的 SNI（sing-box 采用同样的嗅探思路 [来源 S17]）。
 2. **FakeIP 反查**：默认地址池 `198.18.0.0/15` 与 sing-box 相同 [来源 S18]，这个网段是 RFC 2544 保留的基准测试地址 [来源 S19]；IPv6 地址池使用 `fc00::/18` [来源 S18]。
-3. **DNS 应答缓存（真实 IP 模式）**：拦截 DNS 应答，建立 `IP → 域名` 的 LRU 映射。多个域名共用一个 IP 时存在歧义（和 App Connector 的共享 IP 问题同源 [来源 S3]），因此嗅探结果优先。
+3. **DNS 应答缓存（真实 IP 模式）**：拦截 DNS 应答，建立 `IP → 域名` 的 LRU 映射。多个域名共用一个 IP 时存在歧义（和 App Connector 的共享 IP 问题同源 [来源 S3]），因此嗅探结果优先（ECH 例外，见 4.7）。
 
 嗅探超时（例如 300ms）后仍拿不到域名，就只按 IP 规则匹配。〔无来源·设计决策〕
 
@@ -174,7 +175,24 @@
 - **出口故障时不自动回落到 `direct`**：已经命中某个出口的流量，如果该出口不可用，默认直接拒绝，以免本该走出口的流量从本地网卡泄漏；用户可以用 `on_egress_down: direct` 显式开启回落。〔无来源·设计决策〕
 - 想要「未命中一律不出网」的用户，可以配置 `final: reject`。〔无来源·设计决策〕
 
-### 4.7 控制面与「插件」接口〔无来源·设计决策〕
+### 4.7 HTTPS / TLS 处理：只读握手、不解密
+
+**原则**：tailproxy 不终止、也不解密 TLS。规则匹配只需要域名，而域名可以从握手的明文部分读到；决定出口之后，加密字节原样转发。证书校验仍然发生在应用和源站之间，所以**不会产生证书问题，也不需要安装任何 CA**。〔无来源·设计决策〕
+
+| 场景 | 处理方式 | 依据 |
+|---|---|---|
+| TLS（TCP） | 读取 ClientHello 中的 `server_name` 扩展（SNI） | SNI 由客户端在 ClientHello 中告诉服务器要访问的主机名 [来源 S28] |
+| QUIC / HTTP3 | 解开 Initial 包读取 SNI，不需要任何私钥 | Initial 包的密钥由客户端首个 Initial 包中的 Destination Connection ID 派生，并不是用保密密钥保护的 [来源 S29] |
+| ECH（加密 ClientHello） | 外层 SNI 只是提供方的 `public_name`（如 CDN 的公共名），不是真实站点。**客户端带有 ECH 扩展、外层 SNI 与 FakeIP / DNS 映射得到的域名不一致时，以 FakeIP / DNS 映射为准** | ECH 加密真实 SNI，外层 `server_name` 建议填 `ECHConfig.public_name` [来源 S30]；没有 ECH 配置的客户端会发 GREASE ECH，这时外层 SNI 仍是真实域名 [来源 S30] |
+| DNS HTTPS/SVCB 记录 | 对命中规则的域名，改写或剔除 `ipv4hint`/`ipv6hint`，防止客户端拿提示里的真实 IP 直连、绕开 FakeIP；可选 `dns.strip_ech` 剔除 `ech` 参数（默认关闭） | 客户端「可以」使用 hint 中的地址连接服务 [来源 S31]；ECH 配置通过 SVCB/HTTPS 记录下发 [来源 S30] |
+| tailnet 内 `*.ts.net` HTTPS | 交给系统 Tailscale 或 `tailnet` 出站，原样透传 | Tailscale 的 HTTPS 证书由 Let's Encrypt 签发，私钥保存在本机 [来源 S32] |
+
+**为什么不做 MITM 解密**
+- 需要让用户安装并信任自签根 CA；而 targetSdk 为 Android 6.0（API 23）及以下的应用才默认信任用户添加的 CA，更新的应用默认只信任系统 CA [来源 S33]，所以在 Android 上对大多数现代 App 都不起作用。
+- 做了证书固定（pinning）的 App 会直接断连；解密还会让 tailproxy 成为高价值攻击目标。〔无来源·设计决策〕
+- 业务上没有收益：规则只到域名这一级，不需要 URL 路径或报文内容。〔无来源·设计决策〕
+
+### 4.8 控制面与「插件」接口〔无来源·设计决策〕
 
 - **配置文件**：YAML，支持热重载（规则和出口组可以热更新；槽位增删会触发对应 tsnet 节点的启停）。
 - **本地 API**：Unix socket 或 Windows 命名管道提供 REST 接口，用于查询连接列表、命中规则、槽位状态，以及临时切换出口。
@@ -262,6 +280,7 @@ rules:
 | R4 | QUIC/ECH 普及后 SNI 嗅探失效，只能依赖 FakeIP | 〔无来源·待验证〕 |
 | R5 | Windows 上 TUN 默认路由与出口节点冲突 | sing-box 社区 fork 有相关报告 [来源 S26]，需要在 M2 回归测试 |
 | R6 | Apple 平台的审核与 API 约束：packet tunnel 不应用于选择性代理 | 已据 TN3120 调整 macOS / iOS 方案 [来源 S27] |
+| R7 | ECH 普及后 SNI 不可信；浏览器自带 DoH 时 FakeIP 也拿不到域名，此时只能按 IP 规则匹配 | 已在 4.7 定义优先级 [来源 S30]；DoH 旁路的影响范围〔无来源·待验证〕 |
 
 ---
 
@@ -295,4 +314,10 @@ rules:
 | S24 | wireguard-go LICENSE（MIT）：https://github.com/WireGuard/wireguard-go/blob/master/LICENSE |
 | S25 | gVisor LICENSE（Apache-2.0）：https://github.com/google/gvisor/blob/master/LICENSE |
 | S26 | LIghtJUNction/sing-box#380（社区 fork 的 issue）：https://github.com/LIghtJUNction/sing-box/issues/380 |
+| S28 | RFC 6066 §3 Server Name Indication：https://www.rfc-editor.org/rfc/rfc6066 |
+| S29 | RFC 9001 §5.2 Initial Secrets、§9 安全考量：https://www.rfc-editor.org/rfc/rfc9001 |
+| S30 | RFC 9849 TLS Encrypted Client Hello：https://www.rfc-editor.org/rfc/rfc9849 |
+| S31 | RFC 9460 §7.3 ipv4hint / ipv6hint：https://www.rfc-editor.org/rfc/rfc9460 |
+| S32 | Tailscale Docs – Enabling HTTPS：https://tailscale.com/kb/1153/enabling-https |
+| S33 | Android – Network security configuration：https://developer.android.com/privacy-and-security/security-config |
 | S27 | Apple TN3120 – Expected use cases for Network Extension packet tunnel providers：https://developer.apple.com/documentation/technotes/tn3120-expected-use-cases-for-network-extension-packet-tunnel-providers |
