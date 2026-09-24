@@ -67,3 +67,38 @@ func TestUnitRejectsBadPaths(t *testing.T) {
 		t.Fatalf("path with space: %v\n%s", err, u)
 	}
 }
+
+func TestUnitRelay(t *testing.T) {
+	o := UnitOptions{Exe: "/usr/local/bin/tailproxy", StateDir: "/root/.lighthousepro", Relay: true, AllowPrivate: true}
+	u, err := Unit(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Description=tailproxy relay",
+		"After=network-online.target tailscaled.service\n",
+		"Type=notify",
+		"ExecStart=/usr/local/bin/tailproxy relay --state-dir /root/.lighthousepro --allow-private\n",
+		"ReadWritePaths=/root/.lighthousepro\n",
+		"Restart=always",
+		"WantedBy=multi-user.target",
+	} {
+		if !strings.Contains(u, want) {
+			t.Errorf("relay unit lacks %q:\n%s", want, u)
+		}
+	}
+	if strings.Contains(u, "EnvironmentFile") || strings.Contains(u, " run ") {
+		t.Errorf("relay unit runs the proxy:\n%s", u)
+	}
+	if o.Name() != RelayUnitName {
+		t.Fatal(o.Name())
+	}
+	o.AllowPrivate, o.RelayListen = false, "100.98.60.52:1081"
+	if u, _ = Unit(o); !strings.Contains(u, "relay --state-dir /root/.lighthousepro --listen 100.98.60.52:1081\n") {
+		t.Errorf("listen:\n%s", u)
+	}
+	o.RelayListen = "1.2.3.4:1 --allow-private"
+	if _, err := Unit(o); err == nil {
+		t.Error("listen address with spaces accepted")
+	}
+}

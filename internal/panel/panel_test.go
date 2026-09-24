@@ -353,6 +353,7 @@ type testRuntime struct {
 	applied []*config.Config
 	key     string
 	peers   any
+	relay   map[string]string
 }
 
 func (r *testRuntime) Components() []Component { return nil }
@@ -373,6 +374,16 @@ func (r *testRuntime) SetAuthKey(k string) error {
 	return nil
 }
 func (r *testRuntime) ClearAuthKey() error { r.key = ""; return nil }
+func (r *testRuntime) SetRelayToken(name, tok string) error {
+	if name != "us" || len(tok) < 16 {
+		return errors.New("bad relay token")
+	}
+	if r.relay == nil {
+		r.relay = map[string]string{}
+	}
+	r.relay[name] = tok
+	return nil
+}
 
 func egressRevision(t *testing.T, h http.Handler) string {
 	t.Helper()
@@ -439,6 +450,15 @@ func TestTailnetAndAuthKeyEndpoints(t *testing.T) {
 	}
 	if rec := do(t, s.Handler(), "GET", "/api/v1/tailnet", "", nil); rec.Code != 401 {
 		t.Fatalf("tailnet without token: %d", rec.Code)
+	}
+	if rec := do(t, h, "PUT", "/api/v1/egress/us/relay-token", `{"token":"short"}`, jsonHdr); rec.Code != 400 {
+		t.Fatalf("short relay token: %d", rec.Code)
+	}
+	if rec := do(t, h, "PUT", "/api/v1/egress/us/relay-token", `{"token":"relay-token-0123456789"}`, jsonHdr); rec.Code != 200 || rt.relay["us"] != "relay-token-0123456789" {
+		t.Fatalf("relay token: %d %v", rec.Code, rt.relay)
+	}
+	if rec := do(t, s.Handler(), "PUT", "/api/v1/egress/us/relay-token", `{"token":"relay-token-0123456789"}`, jsonHdr); rec.Code != 401 {
+		t.Fatalf("relay token without auth: %d", rec.Code)
 	}
 }
 

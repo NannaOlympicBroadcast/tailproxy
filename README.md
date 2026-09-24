@@ -14,6 +14,7 @@
 | 命令行 start / stop / status / token、systemd 开机自启 | 已实现 |
 | 出口管理器（`internal/egress`）：每个出口一个内嵌 tsnet 节点、固定出口节点、经出口的 DoH 解析、故障转移 / 延迟优选组与健康检查 | 已实现；**尚未用真实出口节点做端到端验证**（见下文） |
 | SOCKS5 入口（`internal/proxy`，仅 CONNECT、仅回环地址）+ 连接追踪 | 已实现 |
+| 中继出口（`tailproxy relay` + `internal/relay`）：客户端只用一台 tailnet 设备就能有多个出口 | 已实现；本机回环端到端验证通过，**尚未在真实 VPS 上验证** |
 | 透明捕获（TUN / TPROXY）、FakeIP DNS、SNI 嗅探、UDP | 未实现 |
 
 ## 启动与管理
@@ -113,7 +114,7 @@ TAILPROXY_PANEL_TOKEN='至少16个字符的令牌' ./tailproxy start -c config.e
 面板内容：
 
 - **概览**：各组件状态、规则和出口数量、重新加载配置。
-- **出口**：配置中的出口槽位和出口组。出口管理器尚未实现，所以运行状态一律显示「未运行」。
+- **出口**：Tailscale 账号登录、账号下的设备列表、已配置的出口（出口节点 / 中继 / 出口组）及其运行状态。
 - **规则**：规则列表、可视化编辑，以及规则测试（输入域名 / IP / 端口，查看命中哪条规则、走哪个出口）。
 - **配置**：当前生效的配置。
 
@@ -125,7 +126,7 @@ TAILPROXY_PANEL_TOKEN='至少16个字符的令牌' ./tailproxy start -c config.e
 
 1. tailproxy 始终运行一个主节点（主机名 `tailproxy`，可用 `tailnet.hostname` 修改）。在「Tailscale 账号」里点「登录 Tailscale」**登录一次**即可。
 2. 主节点登录后，「你账号下的设备」会列出 tailnet 中的所有设备：在线状态、最后在线时间、IP、系统、所有者，以及是否已批准为出口节点。
-3. 对已批准的出口节点点「添加为出口」，就会新建一个出口：写回配置文件的 `egress:` 段，并立即启动对应的设备 `tailproxy-<名称>`。已配置的出口可以直接换成另一个出口节点，也可以删除；删除时，对应设备会从 tailnet 注销，本地状态也会删除。仍被规则引用的出口不能删除（保存时会报错）。
+3. 对已批准的出口节点点「添加为出口节点」，就会新建一个出口：写回配置文件的 `egress:` 段，并立即启动对应的设备 `tailproxy-<名称>`。已配置的出口可以直接换成另一个出口节点，也可以删除；删除时，对应设备会从 tailnet 注销，本地状态也会删除。仍被规则引用的出口不能删除（保存时会报错）。
 4. 因为每个出口都是一台独立的 Tailscale 设备，所以：
    - 在「自动登录（auth key）」里保存一个可重复使用的 auth key 后，新增出口会自动加入 tailnet；
    - 不保存 key 时，每个新出口要在列表里点一次「授权这台设备」。
@@ -163,6 +164,47 @@ curl --socks5-hostname 127.0.0.1:1080 https://example.com/
   - DoH 客户端能从 Cloudflare 的真实解析器取得正确结果。
 - **没有验证**：流量真正经由出口节点发出。这需要一个已登录的 tailnet 和已批准的出口节点，开发环境里没有。第一次使用时，建议通过两个出口分别访问 IP 回显服务（例如 `curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me`，并为它写好对应规则），确认返回的是出口节点的公网 IP。
 
+### 中继出口：一台设备，多个出口
+
+Tailscale 的出口节点是整台设备的设置，一台设备同一时间只能用一个出口节点 [来源 DESIGN S1]。所以上面「出口节点」类型的出口，每个都要单独登录一台 tailnet 设备。**中继**换了一种做法：
+
+- 在每台出口机器（VPS）上运行 `tailproxy relay`：它是一个 SOCKS5 服务（RFC 1928，用户名 / 密码认证 RFC 1929）[来源 DESIGN S48][来源 DESIGN S49]，**只监听本机的 Tailscale 地址**。
+- 客户端 tailproxy 经**主节点**连到这个地址，请它代为连接目标；流量从 VPS 自己的网络出去。
+- 客户端不管配多少个中继，都只有主节点这一台设备；VPS 也**不需要**开启或批准出口节点，只要装好 Tailscale 并登录。
+
+**VPS 上**（已安装并登录 Tailscale）：
+
+```sh
+sudo tailproxy service install --relay     # systemd 开机自启，在 tailscaled 之后启动；打印令牌
+# 或临时在前台运行：tailproxy relay
+tailproxy relay token                       # 以后随时查看令牌（保存在 ~/.lighthousepro/relay.token，权限 600）
+```
+
+**客户端面板**：在「出口」→「你账号下的设备」里找到这台 VPS，点「添加为中继」，填名称、端口（默认 1081）和令牌。令牌保存在客户端的 `<state-dir>/relay/<名称>.token`（权限 600），**不写进配置文件**。也可以直接写配置：
+
+```yaml
+egress:
+  - {name: us, relay: '100.98.60.52:1081'}    # 令牌在面板里填，或用 relay_token_env 指定环境变量
+  - {name: cn, relay: 'vm-0-5-opencloudos:1081', relay_token_env: TP_RELAY_CN}
+  - {name: auto, type: fallback, members: [us, cn]}   # 组成员可以混用出口节点和中继
+```
+
+中继的安全措施：
+
+- 只能监听 Tailscale 地址（100.64.0.0/10、fd7a:115c:a1e0::/48）或回环地址，写 `0.0.0.0` 会直接报错；
+- 只接受来自 tailnet 或回环地址的连接，并且必须带令牌；
+- 默认拒绝连接内网、回环、链路本地（包括云厂商元数据地址 169.254.169.254 [来源 DESIGN S50]）和 tailnet 地址，防止令牌泄露后被用来访问 VPS 自身的服务。确实需要时加 `--allow-private`。
+
+中继的其他行为：
+
+- 目标域名交给 VPS 解析，所以解析结果与出口所在地一致；客户端不做 DNS 查询，也不需要 `doh`（中继出口设置 `doh` 会报错）。
+- 状态：`缺少令牌` → `连不上中继` / `令牌错误` → `就绪`。客户端大约每 20 秒检查一次（出问题时每 5 秒）。和出口节点一样，**不会回落**到本地网络。
+- 端口：VPS 上 1081/TCP，只在 Tailscale 地址上监听，不需要在云防火墙里放行。
+- 更换令牌：在 VPS 上执行 `tailproxy relay token --rotate` 和 `systemctl restart tailproxy-relay`，再在客户端面板点「更新令牌」。
+- 卸载：`sudo tailproxy service uninstall --relay`。
+
+**验证情况**：已在本机回环地址上跑通完整链路（relay → 客户端中继出口 → SOCKS5 → 本地 HTTP 源站，包括令牌错误和缺少令牌的情况）。还没有在真实 VPS 上验证。建议先用 `curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me` 配合对应规则，确认返回的是 VPS 的公网 IP。
+
 **日志上传**：内嵌的 tsnet 与官方客户端一样，默认会把诊断日志上传到 `log.tailscale.com`。不希望上传时，启动前设置 `TS_NO_LOGS_NO_SUPPORT=true`（systemd 服务写进 `tailproxy.env`）。
 
 ### API
@@ -173,6 +215,10 @@ curl --socks5-hostname 127.0.0.1:1080 https://example.com/
 | GET | `/api/v1/config` | 当前生效的配置（只包含环境变量名，不含密钥） |
 | POST | `/api/v1/config/reload` | 重新加载配置文件；失败时保留旧配置 |
 | GET | `/api/v1/egress` | 配置中的出口，以及每个槽位 / 组的运行状态（登录链接、Tailscale IP、出口节点、健康检查） |
+| PUT | `/api/v1/egress` | `{"revision":"…","egress":[…]}` 保存 `egress:` 段并立即应用 |
+| PUT | `/api/v1/egress/{name}/relay-token` | `{"token":"…"}` 保存中继出口的令牌（写入状态目录，不写配置文件） |
+| GET | `/api/v1/tailnet` | 主节点登录状态、auth key 状态、账号下的设备 |
+| PUT / DELETE | `/api/v1/tailnet/authkey` | 保存 / 删除 auth key |
 | GET | `/api/v1/connections` | 活动连接和最近结束的连接 |
 | GET | `/api/v1/rules` | 规则列表、可选目标、`revision`（配置文件内容哈希） |
 | PUT | `/api/v1/rules` | `{"revision":"…","rules":[…]}` 保存整套规则，见下文 |

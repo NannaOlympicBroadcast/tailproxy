@@ -14,8 +14,11 @@ func TestExampleConfigParses(t *testing.T) {
 	if c.Panel.Listen != "127.0.0.1:7708" {
 		t.Fatalf("panel.listen = %q", c.Panel.Listen)
 	}
-	if len(c.Egress) != 3 || len(c.Rules) != 5 {
+	if len(c.Egress) != 4 || len(c.Rules) != 5 {
 		t.Fatalf("got %d egress, %d rules", len(c.Egress), len(c.Rules))
+	}
+	if !c.Egress[2].IsRelay() || c.Egress[0].IsRelay() || c.Egress[3].IsRelay() {
+		t.Fatalf("relay entries: %+v", c.Egress)
 	}
 }
 
@@ -39,8 +42,8 @@ func TestValidateErrors(t *testing.T) {
 		{"unknown field", "egres: []", "field egres not found"},
 		{"reserved name", "egress: [{name: direct, exit_node: x}]", "reserved"},
 		{"duplicate", "egress: [{name: a, exit_node: x}, {name: a, exit_node: y}]", "duplicate"},
-		{"missing exit node", "egress: [{name: a}]", "exit_node is required"},
-		{"bad group member", "egress: [{name: g, type: fallback, members: [nope]}]", "not a defined slot"},
+		{"missing exit node", "egress: [{name: a}]", "exit_node or relay is required"},
+		{"bad group member", "egress: [{name: g, type: fallback, members: [nope]}]", "not a defined exit"},
 		{"unknown type", "egress: [{name: g, type: random, members: [a]}]", "unknown type"},
 		{"unknown target", "rules: [{domain: [a.com], egress: nope}]", "unknown target"},
 		{"both targets", "rules: [{domain: [a.com], egress: direct, final: direct}]", "not both"},
@@ -52,6 +55,10 @@ func TestValidateErrors(t *testing.T) {
 		{"doh hostname", "egress: [{name: cn, exit_node: x, doh: 'https://dns.alidns.com/dns-query'}]", "must be an IP"},
 		{"doh http", "dns: {per_egress_doh: 'http://1.1.1.1/dns-query'}", "https://"},
 		{"health interval", "egress: [{name: a, exit_node: x}, {name: g, type: latency, members: [a], health_check: {url: 'https://x', interval: 1s}}]", "at least 5s"},
+		{"relay and exit node", "egress: [{name: us, exit_node: x, relay: '100.98.60.52:1081'}]", "not both"},
+		{"relay bad addr", "egress: [{name: us, relay: '100.98.60.52'}]", "host:port"},
+		{"relay with doh", "egress: [{name: us, relay: 'a:1081', doh: 'https://1.1.1.1/dns-query'}]", "not used with relay"},
+		{"neither", "egress: [{name: us}]", "exit_node or relay is required"},
 		{"bad egress name", "egress: [{name: US, exit_node: x}]", "a-z"},
 		{"doh on group", "egress: [{name: a, exit_node: x}, {name: g, type: fallback, members: [a], doh: 'https://1.1.1.1/dns-query'}]", "per slot"},
 	}

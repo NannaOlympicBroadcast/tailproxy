@@ -52,6 +52,8 @@ type Runtime interface {
 	ApplyEgress(cfg *config.Config) error
 	SetAuthKey(key string) error
 	ClearAuthKey() error
+	// SetRelayToken saves the token of the relay egress name.
+	SetRelayToken(name, token string) error
 }
 
 // Server is the web panel. Create it with New and run it with ListenAndServe.
@@ -231,6 +233,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/config/reload", s.auth(s.handleReload))
 	mux.HandleFunc("GET /api/v1/egress", s.auth(s.handleEgress))
 	mux.HandleFunc("PUT /api/v1/egress", s.auth(s.handleEgressPut))
+	mux.HandleFunc("PUT /api/v1/egress/{name}/relay-token", s.auth(s.handleRelayTokenPut))
 	mux.HandleFunc("GET /api/v1/tailnet", s.auth(s.handleTailnet))
 	mux.HandleFunc("PUT /api/v1/tailnet/authkey", s.auth(s.handleAuthKeyPut))
 	mux.HandleFunc("DELETE /api/v1/tailnet/authkey", s.auth(s.handleAuthKeyDelete))
@@ -423,6 +426,26 @@ func (s *Server) handleAuthKeyPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.runtime.SetAuthKey(req.AuthKey); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleRelayTokenPut saves a relay egress's token; it is written to the
+// state directory (mode 0600), never to the config file.
+func (s *Server) handleRelayTokenPut(w http.ResponseWriter, r *http.Request) {
+	if s.runtime == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "proxy is not running"})
+		return
+	}
+	var req struct {
+		Token string `json:"token"`
+	}
+	if !decodeJSONBody(w, r, &req) {
+		return
+	}
+	if err := s.runtime.SetRelayToken(r.PathValue("name"), req.Token); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}

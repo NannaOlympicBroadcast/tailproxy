@@ -78,13 +78,13 @@
         <h2>你账号下的设备</h2>
         <label class="inline"><input type="checkbox" id="peers-online" checked> 只看在线</label>
       </div>
-      <p class="muted">由主节点读取。已开启并批准为出口节点的设备，可以一键添加为 tailproxy 的出口。</p>
+      <p class="muted">由主节点读取。每台设备可以用两种方式成为出口：<strong>出口节点</strong>（设备已开启并批准 exit node；tailproxy 为每个出口单独登录一台 tailnet 设备）或 <strong>中继</strong>（设备上运行 <code>tailproxy relay</code>；所有中继共用主节点这一台设备，不需要开启出口节点）。</p>
       <table><thead><tr><th>设备</th><th>Tailscale IP</th><th>系统</th><th>状态</th><th>出口节点</th><th>操作</th></tr></thead><tbody id="peer-list"></tbody></table>
     </div>
 
     <div class="card">
       <h2>已配置的出口</h2>
-      <p class="muted">每个出口是一台独立的 tailnet 设备（主机名 tailproxy-&lt;名称&gt;），固定使用一个出口节点。修改会写回配置文件的 <code>egress:</code> 段并立即生效。出口组（故障转移 / 延迟优选）目前请在配置文件里编辑。</p>
+      <p class="muted">出口节点类型的出口各是一台独立的 tailnet 设备（主机名 tailproxy-&lt;名称&gt;）；中继类型的出口经主节点连到对方的 <code>tailproxy relay</code>，令牌保存在状态目录（权限 600），不写进配置文件。修改会写回配置文件的 <code>egress:</code> 段并立即生效。出口组（故障转移 / 延迟优选）目前请在配置文件里编辑，成员可以是出口节点或中继。</p>
       <table><thead><tr><th>名称</th><th>类型</th><th>出口节点 / 成员</th><th>状态</th><th>设备 / 健康</th><th>操作</th></tr></thead><tbody id="egress-list"></tbody></table>
     </div>
   </section>

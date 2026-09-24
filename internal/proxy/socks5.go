@@ -2,37 +2,19 @@ package proxy
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/netip"
 	"syscall"
 	"time"
+
+	"github.com/NannaOlympicBroadcast/tailproxy/internal/socks5"
 )
 
 // SOCKS5 (RFC 1928) inbound: no authentication, CONNECT only. It must listen
 // on a loopback address, since anyone who can reach it can use the egresses.
-
-const (
-	socksVer = 5
-
-	cmdConnect = 1
-
-	atypIPv4   = 1
-	atypDomain = 3
-	atypIPv6   = 4
-
-	repSucceeded        = 0
-	repGeneralFailure   = 1
-	repNotAllowed       = 2
-	repHostUnreachable  = 4
-	repConnRefused      = 5
-	repCmdNotSupported  = 7
-	repAtypNotSupported = 8
-)
 
 // SOCKS is a SOCKS5 inbound.
 type SOCKS struct {
@@ -88,14 +70,14 @@ func (s *SOCKS) logf(format string, args ...any) {
 
 func (s *SOCKS) handle(ctx context.Context, client net.Conn) {
 	client.SetDeadline(time.Now().Add(15 * time.Second))
-	host, port, err := socksHandshake(client)
+	host, port, err := socks5.ServerHandshake(client, nil)
 	if err != nil {
 		client.Close()
 		return
 	}
 	target, c, err := s.Router.Connect(ctx, "socks5", client.RemoteAddr().String(), host, port)
 	if err != nil {
-		socksReply(client, replyCode(err), nil)
+		socks5.WriteReply(client, replyCode(err), netip.AddrPort{})
 		client.Close()
 		s.logf("socks5: %s: %v", describe(c), err)
 		return
@@ -104,7 +86,7 @@ func (s *SOCKS) handle(ctx context.Context, client net.Conn) {
 	if ta, ok := target.LocalAddr().(*net.TCPAddr); ok {
 		bound = ta.AddrPort()
 	}
-	if err := socksReply(client, repSucceeded, &bound); err != nil {
+	if err := socks5.WriteReply(client, socks5.RepSucceeded, bound); err != nil {
 		target.Close()
 		client.Close()
 		s.Router.Tracker.finish(c, "reply: "+err.Error())
@@ -114,115 +96,21 @@ func (s *SOCKS) handle(ctx context.Context, client net.Conn) {
 	s.Router.Relay(client, target, c)
 }
 
-// socksHandshake performs method negotiation and reads a CONNECT request.
-// Unsupported requests get an error reply before it returns an error.
-func socksHandshake(rw io.ReadWriter) (host string, port uint16, err error) {
-	var hdr [2]byte
-	if _, err = io.ReadFull(rw, hdr[:]); err != nil {
-		return
-	}
-	if hdr[0] != socksVer {
-		return "", 0, fmt.Errorf("not SOCKS5 (version %d)", hdr[0])
-	}
-	methods := make([]byte, hdr[1])
-	if _, err = io.ReadFull(rw, methods); err != nil {
-		return
-	}
-	noAuth := false
-	for _, m := range methods {
-		noAuth = noAuth || m == 0
-	}
-	if !noAuth {
-		rw.Write([]byte{socksVer, 0xFF})
-		return "", 0, errors.New("client does not offer no-auth")
-	}
-	if _, err = rw.Write([]byte{socksVer, 0}); err != nil {
-		return
-	}
-
-	var req [4]byte
-	if _, err = io.ReadFull(rw, req[:]); err != nil {
-		return
-	}
-	if req[0] != socksVer {
-		return "", 0, fmt.Errorf("bad request version %d", req[0])
-	}
-	switch req[3] {
-	case atypIPv4:
-		var b [4]byte
-		if _, err = io.ReadFull(rw, b[:]); err != nil {
-			return
-		}
-		host = netip.AddrFrom4(b).String()
-	case atypIPv6:
-		var b [16]byte
-		if _, err = io.ReadFull(rw, b[:]); err != nil {
-			return
-		}
-		host = netip.AddrFrom16(b).Unmap().String()
-	case atypDomain:
-		var n [1]byte
-		if _, err = io.ReadFull(rw, n[:]); err != nil {
-			return
-		}
-		b := make([]byte, n[0])
-		if _, err = io.ReadFull(rw, b); err != nil {
-			return
-		}
-		host = string(b)
-	default:
-		socksReply(rw, repAtypNotSupported, nil)
-		return "", 0, fmt.Errorf("address type %d not supported", req[3])
-	}
-	var p [2]byte
-	if _, err = io.ReadFull(rw, p[:]); err != nil {
-		return
-	}
-	port = binary.BigEndian.Uint16(p[:])
-	if req[1] != cmdConnect {
-		socksReply(rw, repCmdNotSupported, nil)
-		return "", 0, fmt.Errorf("command %d not supported (only CONNECT)", req[1])
-	}
-	if host == "" {
-		socksReply(rw, repGeneralFailure, nil)
-		return "", 0, errors.New("empty host")
-	}
-	return host, port, nil
-}
-
-func socksReply(w io.Writer, code byte, bound *netip.AddrPort) error {
-	b := []byte{socksVer, code, 0}
-	if bound != nil && bound.Addr().Unmap().Is4() {
-		a := bound.Addr().Unmap().As4()
-		b = append(b, atypIPv4)
-		b = append(b, a[:]...)
-	} else if bound != nil && bound.Addr().Is6() {
-		a := bound.Addr().As16()
-		b = append(b, atypIPv6)
-		b = append(b, a[:]...)
-	} else {
-		b = append(b, atypIPv4, 0, 0, 0, 0)
-	}
-	var p [2]byte
-	if bound != nil {
-		binary.BigEndian.PutUint16(p[:], bound.Port())
-	}
-	_, err := w.Write(append(b, p[:]...))
-	return err
-}
-
 func replyCode(err error) byte {
 	var ne net.Error
 	var dnsErr *net.DNSError
+	var relayErr *socks5.ReplyError
 	switch {
 	case errors.Is(err, ErrRejected):
-		return repNotAllowed
+		return socks5.RepNotAllowed
+	case errors.As(err, &relayErr):
+		return relayErr.Code // pass a relay's answer through
 	case errors.Is(err, syscall.ECONNREFUSED):
-		return repConnRefused
+		return socks5.RepConnRefused
 	case errors.As(err, &dnsErr):
-		return repHostUnreachable
+		return socks5.RepHostUnreachable
 	case errors.As(err, &ne) && ne.Timeout():
-		return repHostUnreachable
+		return socks5.RepHostUnreachable
 	}
-	return repGeneralFailure
+	return socks5.RepGeneralFailure
 }

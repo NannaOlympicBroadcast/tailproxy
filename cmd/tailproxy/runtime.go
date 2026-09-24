@@ -50,4 +50,8 @@ func (r *runtimeView) SetAuthKey(key string) error { return r.egress.SetAuthKey(
 
 func (r *runtimeView) ClearAuthKey() error { return r.egress.ClearAuthKey() }
 
+func (r *runtimeView) SetRelayToken(name, token string) error {
+	return r.egress.SetRelayToken(name, token)
+}
+
 func (r *runtimeView) Connections() any { return r.tracker.Snapshot() }

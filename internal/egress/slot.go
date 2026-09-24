@@ -62,7 +62,7 @@ type Slot struct {
 // Status is a slot's or group's runtime state as shown in the panel.
 type Status struct {
 	Name         string        `json:"name"`
-	Kind         string        `json:"kind"` // "slot", "group" or "main"
+	Kind         string        `json:"kind"` // "slot", "relay", "group" or "main"
 	State        string        `json:"state"`
 	Detail       string        `json:"detail,omitempty"`
 	AuthURL      string        `json:"auth_url,omitempty"`
@@ -74,6 +74,8 @@ type Status struct {
 	Selected     string        `json:"selected,omitempty"` // group: member currently used
 	LoginName    string        `json:"login_name,omitempty"`
 	Tailnet      string        `json:"tailnet,omitempty"`
+	Relay        string        `json:"relay,omitempty"`        // relay: host:port
+	TokenSource  string        `json:"token_source,omitempty"` // relay: env:<NAME> | file | ""
 }
 
 // ExitNodeInfo describes the exit node a slot uses.
@@ -367,6 +369,9 @@ func (s *Slot) Status() Status {
 	return st
 }
 
+// Name is the egress name ("" for the main slot).
+func (s *Slot) Name() string { return s.name }
+
 // Ready reports whether traffic can go through the exit node (for the main
 // slot: whether it is logged in).
 func (s *Slot) Ready() bool {
@@ -480,15 +485,18 @@ func (s *Slot) logout(ctx context.Context) {
 // checkHealth fetches url through the exit node and records the result.
 func (s *Slot) checkHealth(ctx context.Context, url string) {
 	h := &Health{URL: url, Checked: time.Now()}
-	defer func() {
-		s.mu.Lock()
-		s.health = h
-		s.mu.Unlock()
-	}()
 	if !s.Ready() {
 		h.Error = "出口未就绪"
-		return
+	} else {
+		probeHealth(ctx, url, s.Dial, h)
 	}
+	s.mu.Lock()
+	s.health = h
+	s.mu.Unlock()
+}
+
+// probeHealth fetches url with connections from dial and fills in h.
+func probeHealth(ctx context.Context, url string, dial func(context.Context, string, uint16) (net.Conn, error), h *Health) {
 	client := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			host, portStr, err := net.SplitHostPort(addr)
@@ -499,7 +507,7 @@ func (s *Slot) checkHealth(ctx context.Context, url string) {
 			if err != nil {
 				return nil, err
 			}
-			return s.Dial(ctx, host, uint16(port))
+			return dial(ctx, host, uint16(port))
 		},
 		DisableKeepAlives: true,
 	}}

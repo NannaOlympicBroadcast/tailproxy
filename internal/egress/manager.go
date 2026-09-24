@@ -1,6 +1,7 @@
 // Package egress manages the Tailscale side of tailproxy (DESIGN §4.4): a
-// main node you log in once with, and one embedded tsnet node per egress
-// slot, each pinned to one exit node, plus fallback / latency groups.
+// main node you log in once with, one embedded tsnet node per egress slot,
+// each pinned to one exit node, relays (`tailproxy relay` on another tailnet
+// device, reached over the main node) and fallback / latency groups.
 package egress
 
 import (
@@ -16,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tsnet"
 
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/config"
@@ -45,7 +47,8 @@ type Manager struct {
 	cancel     context.CancelFunc
 	main       *Slot
 	slots      map[string]*Slot
-	order      []string // config order, slots and groups
+	relays     map[string]*Relay
+	order      []string // config order: slots, relays and groups
 	groups     map[string]*group
 	defaultDoH string
 
@@ -55,7 +58,7 @@ type Manager struct {
 type group struct {
 	name    string
 	kind    string // fallback | latency
-	members []*Slot
+	members []member
 	check   *config.HealthCheck
 	every   time.Duration
 
@@ -71,7 +74,7 @@ func New(cfg *config.Config, stateDir string, logf func(string, ...any)) (*Manag
 	if logf == nil {
 		logf = log.Printf
 	}
-	m := &Manager{stateDir: stateDir, tailnet: cfg.Tailnet, logf: logf, tsnetLogf: func(string, ...any) {}, slots: map[string]*Slot{}, groups: map[string]*group{}}
+	m := &Manager{stateDir: stateDir, tailnet: cfg.Tailnet, logf: logf, tsnetLogf: func(string, ...any) {}, slots: map[string]*Slot{}, relays: map[string]*Relay{}, groups: map[string]*group{}}
 	if os.Getenv("TAILPROXY_TSNET_DEBUG") != "" {
 		m.tsnetLogf = logf
 	}
@@ -127,10 +130,11 @@ func (m *Manager) newServer(s *Slot) *tsnet.Server {
 	}
 }
 
-// Apply makes the running slots and groups match cfg.Egress: new slots are
-// created (and started if the manager runs), removed ones are stopped,
-// logged out and their state deleted, and changed exit nodes / DoH URLs are
-// switched in place. cfg must already be validated.
+// Apply makes the running slots, relays and groups match cfg.Egress: new
+// ones are created (and started if the manager runs), removed slots are
+// stopped, logged out and their state deleted, removed relays forget their
+// token, and changed exit nodes / DoH URLs / relay addresses are switched in
+// place. cfg must already be validated.
 func (m *Manager) Apply(cfg *config.Config) error {
 	groups := map[string]*group{}
 	for _, e := range cfg.Egress {
@@ -154,8 +158,21 @@ func (m *Manager) Apply(cfg *config.Config) error {
 	m.mu.Lock()
 	ctx := m.ctx
 	want := map[string]bool{}
+	wantRelay := map[string]bool{}
 	var added []*Slot
+	var addedRelays []*Relay
 	for _, e := range cfg.Egress {
+		if e.IsRelay() {
+			wantRelay[e.Name] = true
+			if r, ok := m.relays[e.Name]; ok {
+				r.configure(e.Relay, e.RelayTokenEnv)
+				continue
+			}
+			r := newRelay(e.Name, e.Relay, e.RelayTokenEnv, m.relayTokenPath(e.Name), m.dialTailnetOnly, m.logf)
+			m.relays[e.Name] = r
+			addedRelays = append(addedRelays, r)
+			continue
+		}
 		if e.IsGroup() {
 			continue
 		}
@@ -185,10 +202,21 @@ func (m *Manager) Apply(cfg *config.Config) error {
 			delete(m.slots, name)
 		}
 	}
+	var removedRelays []*Relay
+	for name, r := range m.relays {
+		if !wantRelay[name] {
+			removedRelays = append(removedRelays, r)
+			delete(m.relays, name)
+		}
+	}
 	for _, e := range cfg.Egress {
 		if g, ok := groups[e.Name]; ok {
 			for _, mname := range e.Members {
-				g.members = append(g.members, m.slots[mname])
+				if s, ok := m.slots[mname]; ok {
+					g.members = append(g.members, s)
+				} else if r, ok := m.relays[mname]; ok {
+					g.members = append(g.members, r)
+				}
 			}
 		}
 	}
@@ -205,6 +233,15 @@ func (m *Manager) Apply(cfg *config.Config) error {
 			m.logf("egress %s: added (exit node %s)", s.name, s.spec)
 			s.start(ctx)
 		}
+		for _, r := range addedRelays {
+			m.logf("egress %s: added (relay %s)", r.name, r.addr)
+			r.start(ctx)
+		}
+	}
+	for _, r := range removedRelays {
+		r.stop()
+		r.removeToken()
+		m.logf("egress %s: removed", r.name)
 	}
 	for _, s := range removed {
 		s.logout(context.Background())
@@ -224,9 +261,13 @@ func (m *Manager) Start(ctx context.Context) {
 	m.ctx, m.cancel = context.WithCancel(ctx)
 	ctx = m.ctx
 	slots := append([]*Slot{m.main}, m.slotList()...)
+	relays := m.relayList()
 	m.mu.Unlock()
 	for _, s := range slots {
 		s.start(ctx)
+	}
+	for _, r := range relays {
+		r.start(ctx)
 	}
 	m.wg.Add(1)
 	go func() {
@@ -273,6 +314,43 @@ func (m *Manager) slotList() []*Slot {
 	return out
 }
 
+// relayList returns the relays in config order. Caller holds m.mu.
+func (m *Manager) relayList() []*Relay {
+	var out []*Relay
+	for _, name := range m.order {
+		if r, ok := m.relays[name]; ok {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// relayTokenPath is where a relay egress's token is saved.
+func (m *Manager) relayTokenPath(name string) string {
+	return filepath.Join(m.stateDir, "relay", name+".token")
+}
+
+// dialTailnetOnly is DialTailnet without the "via" result, for relays.
+func (m *Manager) dialTailnetOnly(ctx context.Context, host string, port uint16) (net.Conn, error) {
+	c, _, err := m.DialTailnet(ctx, host, port)
+	return c, err
+}
+
+// SetRelayToken saves the token for the relay egress name and re-checks it.
+func (m *Manager) SetRelayToken(name, tok string) error {
+	m.mu.RLock()
+	r, ok := m.relays[name]
+	m.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("没有名为 %q 的中继出口", name)
+	}
+	if err := r.setToken(tok); err != nil {
+		return err
+	}
+	m.logf("egress %s: relay token saved", name)
+	return nil
+}
+
 // Close stops all nodes. Their tailnet state is kept for the next start.
 func (m *Manager) Close() error {
 	m.mu.Lock()
@@ -280,34 +358,42 @@ func (m *Manager) Close() error {
 		m.cancel()
 	}
 	slots := append([]*Slot{m.main}, m.slotList()...)
+	relays := m.relayList()
 	m.mu.Unlock()
 	m.wg.Wait()
+	for _, r := range relays {
+		r.stop()
+	}
 	for _, s := range slots {
 		s.stop()
 	}
 	return nil
 }
 
-// Dial connects to host:port through the egress named target (a slot or a
-// group) and returns the slot that carried the connection.
+// Dial connects to host:port through the egress named target (a slot, a
+// relay or a group) and returns the exit that carried the connection.
 func (m *Manager) Dial(ctx context.Context, target, host string, port uint16) (net.Conn, string, error) {
 	m.mu.RLock()
 	s, isSlot := m.slots[target]
+	r, isRelay := m.relays[target]
 	g, isGroup := m.groups[target]
 	m.mu.RUnlock()
+	var x member
 	switch {
 	case isSlot:
-		c, err := s.Dial(ctx, host, port)
-		return c, s.name, err
+		x = s
+	case isRelay:
+		x = r
 	case isGroup:
-		s, err := g.pick()
-		if err != nil {
+		var err error
+		if x, err = g.pick(); err != nil {
 			return nil, "", err
 		}
-		c, err := s.Dial(ctx, host, port)
-		return c, s.name, err
+	default:
+		return nil, "", fmt.Errorf("unknown egress %q", target)
 	}
-	return nil, "", fmt.Errorf("unknown egress %q", target)
+	c, err := x.Dial(ctx, host, port)
+	return c, x.Name(), err
 }
 
 // DialTailnet connects to a tailnet address (100.x IP or MagicDNS name) via
@@ -329,8 +415,8 @@ func (m *Manager) DialTailnet(ctx context.Context, host string, port uint16) (ne
 	return nil, "", fmt.Errorf("%w: no node is connected to the tailnet", ErrNotReady)
 }
 
-func (g *group) pick() (*Slot, error) {
-	var best *Slot
+func (g *group) pick() (member, error) {
+	var best member
 	bestRTT := 0.0
 	for _, s := range g.members {
 		if !s.Ready() {
@@ -353,7 +439,7 @@ func (g *group) pick() (*Slot, error) {
 		return nil, fmt.Errorf("%w: no member of group %s is ready", ErrNotReady, g.name)
 	}
 	g.mu.Lock()
-	g.selected = best.name
+	g.selected = best.Name()
 	g.mu.Unlock()
 	return best, nil
 }
@@ -368,13 +454,17 @@ func (m *Manager) Status() []Status {
 			out = append(out, s.Status())
 			continue
 		}
+		if r, ok := m.relays[name]; ok {
+			out = append(out, r.Status())
+			continue
+		}
 		g := m.groups[name]
 		st := Status{Name: g.name, Kind: "group", State: StateExitNodePending, Detail: "没有就绪的成员"}
 		for _, s := range g.members {
-			st.Members = append(st.Members, s.name)
+			st.Members = append(st.Members, s.Name())
 		}
 		if s, err := g.pick(); err == nil {
-			st.State, st.Detail, st.Selected = StateReady, "", s.name
+			st.State, st.Detail, st.Selected = StateReady, "", s.Name()
 		}
 		out = append(out, st)
 	}
@@ -388,22 +478,28 @@ func (m *Manager) Summary() (state, detail string) {
 		return "degraded", "主节点：" + main.State + "（在「出口」页登录 Tailscale）"
 	}
 	m.mu.RLock()
-	slots := m.slotList()
+	var exits []member
+	for _, s := range m.slotList() {
+		exits = append(exits, s)
+	}
+	for _, r := range m.relayList() {
+		exits = append(exits, r)
+	}
 	m.mu.RUnlock()
-	if len(slots) == 0 {
+	if len(exits) == 0 {
 		return "idle", "已登录 " + main.LoginName + "，还没有配置出口"
 	}
 	ready := 0
-	for _, s := range slots {
-		if s.Ready() {
+	for _, x := range exits {
+		if x.Ready() {
 			ready++
 		}
 	}
 	state = "running"
-	if ready < len(slots) {
+	if ready < len(exits) {
 		state = "degraded"
 	}
-	return state, fmt.Sprintf("已登录 %s，%d/%d 个出口就绪", main.LoginName, ready, len(slots))
+	return state, fmt.Sprintf("已登录 %s，%d/%d 个出口就绪", main.LoginName, ready, len(exits))
 }
 
 // ---- account: one login, auth key, devices ----
@@ -527,6 +623,7 @@ type Peer struct {
 	Country        string     `json:"country,omitempty"`
 	Tailproxy      string     `json:"tailproxy,omitempty"` // "main" or egress name if it is one of ours
 	UsedBy         []string   `json:"used_by,omitempty"`   // egress slots using it as exit node
+	RelayFor       []string   `json:"relay_for,omitempty"` // relay egresses pointing at it
 }
 
 // Peers lists the tailnet's devices, read from the main node (or, before it
@@ -535,6 +632,7 @@ type Peer struct {
 func (m *Manager) Peers(ctx context.Context) ([]Peer, error) {
 	m.mu.RLock()
 	nodes := append([]*Slot{m.main}, m.slotList()...)
+	relays := m.relayList()
 	m.mu.RUnlock()
 	var from *Slot
 	for _, s := range nodes {
@@ -577,6 +675,11 @@ func (m *Manager) Peers(ctx context.Context) ([]Peer, error) {
 		for _, ip := range p.TailscaleIPs {
 			e.IPs = append(e.IPs, ip.String())
 		}
+		for _, r := range relays {
+			if peerMatches(p, r.relayHost()) {
+				e.RelayFor = append(e.RelayFor, r.name)
+			}
+		}
 		if u, ok := ts.User[p.UserID]; ok {
 			e.Owner = u.LoginName
 		}
@@ -616,4 +719,23 @@ func writeFile0600(path string, data []byte) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)
+}
+
+// peerMatches reports whether host (as written in a relay address) names p:
+// a Tailscale IP, the hostname, or the MagicDNS name or its first label.
+func peerMatches(p *ipnstate.PeerStatus, host string) bool {
+	want := strings.TrimSuffix(strings.ToLower(host), ".")
+	if want == "" {
+		return false
+	}
+	dns := strings.TrimSuffix(strings.ToLower(p.DNSName), ".")
+	if strings.EqualFold(p.HostName, want) || dns == want || strings.SplitN(dns, ".", 2)[0] == want {
+		return true
+	}
+	for _, ip := range p.TailscaleIPs {
+		if ip.String() == want {
+			return true
+		}
+	}
+	return false
 }

@@ -10,6 +10,8 @@ egress:
     exit_node: tokyo-vps            # 主机名 / 100.x IP / StableID
   - name: us
     exit_node: 100.101.102.103
+  - name: sg                        # 中继：对方运行 tailproxy relay，本机不用多登录设备
+    relay: 100.98.60.52:1081        # 令牌在面板里填（存到状态目录），或用 relay_token_env
   - name: auto
     type: fallback
     members: [us, jp]

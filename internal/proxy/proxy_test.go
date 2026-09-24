@@ -16,6 +16,7 @@ import (
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/config"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/egress"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/rule"
+	"github.com/NannaOlympicBroadcast/tailproxy/internal/socks5"
 )
 
 // startSOCKS runs a SOCKS5 inbound with the given rules and a real (never
@@ -153,7 +154,7 @@ func TestSOCKSProtocolErrors(t *testing.T) {
 	io.ReadFull(c, reply)
 	c.Write([]byte{5, 3, 0, 1, 0, 0, 0, 0, 0, 0})
 	rep := make([]byte, 10)
-	if _, err := io.ReadFull(c, rep); err != nil || rep[1] != repCmdNotSupported {
+	if _, err := io.ReadFull(c, rep); err != nil || rep[1] != socks5.RepCmdNotSupported {
 		t.Fatalf("UDP ASSOCIATE reply %v, %v", rep, err)
 	}
 
@@ -173,14 +174,14 @@ func TestListenSOCKSLoopbackOnly(t *testing.T) {
 }
 
 func TestReplyCode(t *testing.T) {
-	if replyCode(ErrRejected) != repNotAllowed {
+	if replyCode(ErrRejected) != socks5.RepNotAllowed {
 		t.Fatal("rejected")
 	}
 	_, err := net.DialTimeout("tcp", "127.0.0.1:1", time.Second)
-	if err != nil && replyCode(err) != repConnRefused {
+	if err != nil && replyCode(err) != socks5.RepConnRefused {
 		t.Fatalf("refused: %v -> %d", err, replyCode(err))
 	}
-	if replyCode(errors.New("x")) != repGeneralFailure {
+	if replyCode(errors.New("x")) != socks5.RepGeneralFailure {
 		t.Fatal("general")
 	}
 }

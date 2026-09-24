@@ -146,6 +146,9 @@
 - **每个槽位各自的 DNS**：命中某槽位的域名，通过该槽位的 `Dial` 访问 DoH（如 `https://1.1.1.1/dns-query`），保证解析结果和出口地理位置一致，也避免 DNS 泄漏。〔无来源·设计决策〕
 - **UDP**：每个槽位维护一张 NAT 表，超时参考 sing-box 默认的 5m [来源 S5]。可选择阻断 UDP/443（QUIC），迫使应用回落到 TCP，以便稳定拿到 SNI。〔无来源·设计决策〕
 - **资源开销**：每个槽位都是一个完整的 gVisor 栈加一个 WireGuard 引擎。v1 限制槽位数量（例如 ≤8），并支持懒启动（首次命中时才连接）。〔无来源·设计决策〕
+- **中继出口（relay）**：因为一台设备只能用一个出口节点 [来源 S1]，「一个出口一台设备」是出口节点方案的固有成本。中继出口不用出口节点：出口机器上运行 `tailproxy relay`（SOCKS5 CONNECT + 用户名 / 密码认证 [来源 S48][来源 S49]），客户端经主节点的 `Dial` 连到它的 Tailscale 地址（普通 tailnet 流量，不需要 `autogroup:internet`），域名由中继在出口机器上解析。客户端只有主节点一台设备，出口机器也不需要 `--advertise-exit-node`。〔无来源·设计决策〕
+  - 中继只监听 Tailscale 地址或回环地址，只接受 tailnet 或回环来源，必须带令牌；默认拒绝内网、回环、链路本地（含云元数据 169.254.169.254 [来源 S50]）和 tailnet 目的地址，`--allow-private` 才放开。〔无来源·设计决策〕
+  - 代价：中继是 TCP 代理，不转发 UDP（目前客户端也只支持 TCP）；出口机器多一个进程。与出口节点可以混用，也可以同在一个出口组里。〔无来源·设计决策〕
 
 ### 4.5 tailnet 侧配置要求
 
@@ -233,6 +236,7 @@
 | 53 | UDP+TCP | 给局域网客户端的 DNS（FakeIP / 分流解析） | 仅路由器 / TPROXY 模式需要；TUN 模式在虚拟网卡内部劫持 DNS，不占主机端口 | 实际监听 `127.0.0.1:1053`，由 nft 把 53 重定向过来；路由器模式可直接监听 LAN 接口的 53 | 桌面 Linux 上 systemd-resolved 已占用 `127.0.0.53` / `127.0.0.54` 的 53 端口 [来源 S46]；IANA 53 = domain [来源 S44]；绑定方式〔无来源·设计决策〕 |
 | 7893 | TCP+UDP | TPROXY 透明代理入口 | 仅 Linux TPROXY 模式 | 只接收 nft 标记后送来的流量，不对外暴露 | TPROXY 需要一个设置了 `IP_TRANSPARENT` 的监听套接字 [来源 S10]；端口号〔无来源·设计决策〕 |
 | 1080 | TCP+UDP | SOCKS5 / HTTP 兜底入口 | 可选，默认关闭 | `127.0.0.1:1080` | IANA 1080 = socks [来源 S44] |
+| 1081 | TCP | **VPS 上的** `tailproxy relay`（中继出口的服务端，SOCKS5 + 用户名 / 密码认证） | 仅使用中继出口时 | 只绑定本机 Tailscale IP（或回环），拒绝 `0.0.0.0` | 协议 [来源 S48][来源 S49]；端口号取 1080 的下一个，避免与本机 SOCKS 入口冲突〔无来源·设计决策〕 |
 | 41642–41649 | UDP | 各 tsnet 槽位的 WireGuard 端口，每个槽位一个 | 否：默认 `Port=0` 自动选择；只有在需要固定防火墙规则时才启用这个范围 | 所有接口 | tsnet `Port` 为 0 时自动选择 [来源 S4]；系统 tailscaled 默认使用 41641，所以从 41642 开始，避免冲突 [来源 S47] |
 | —— | 状态文件 + 信号 | 本地 CLI（`stop` / `status` / `token`）通过 `~/.lighthousepro` 下的状态文件和 SIGTERM 控制服务 | 是 | 仅本机 | 〔无来源·设计决策〕，不占 TCP 端口 |
 
@@ -396,4 +400,7 @@ rules:
 | S44 | IANA Service Name and Transport Protocol Port Number Registry：https://www.iana.org/assignments/service-names-port-numbers/service-names-port-numbers.xhtml |
 | S46 | systemd-resolved.service(8)：https://man7.org/linux/man-pages/man8/systemd-resolved.service.8.html |
 | S47 | Tailscale Docs – What firewall ports should I open：https://tailscale.com/kb/1082/firewall-ports |
+| S48 | RFC 1928 SOCKS Protocol Version 5：https://www.rfc-editor.org/rfc/rfc1928 |
+| S49 | RFC 1929 Username/Password Authentication for SOCKS V5：https://www.rfc-editor.org/rfc/rfc1929 |
+| S50 | AWS EC2 – Access instance metadata（IMDS 地址 169.254.169.254）：https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instancedata-data-retrieval.html |
 | S27 | Apple TN3120 – Expected use cases for Network Extension packet tunnel providers：https://developer.apple.com/documentation/technotes/tn3120-expected-use-cases-for-network-extension-packet-tunnel-providers |

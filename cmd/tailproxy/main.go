@@ -1,12 +1,14 @@
-// Command tailproxy runs the tailproxy daemon. The current build serves the
-// web panel (default 127.0.0.1:7708) backed by the config loader and rule
-// engine; the egress manager and capture layers are not implemented yet.
+// Command tailproxy runs the tailproxy daemon: the web panel (default
+// 127.0.0.1:7708), the rule engine, the egress manager and the SOCKS5
+// inbound. `tailproxy relay` runs the other end of a relay egress on a VPS.
 //
 //	tailproxy start  [-c config.yaml] [--ephemeral-token] [--state-dir DIR]  run in the background
 //	tailproxy run    [-c config.yaml] [--ephemeral-token] [--state-dir DIR]  run in the foreground
 //	tailproxy stop   [--state-dir DIR]
 //	tailproxy status [--state-dir DIR]
 //	tailproxy token  [--rotate] [--state-dir DIR]                            print or replace the token
+//	tailproxy relay  [--listen ADDR] [--allow-private] [--state-dir DIR]     run a relay (on a VPS)
+//	tailproxy relay token [--rotate] [--state-dir DIR]
 //	tailproxy version
 package main
 
@@ -41,6 +43,7 @@ const usage = `用法：tailproxy <命令> [参数]
   status   查看服务状态
   token    打印持久化保存的访问令牌；加 --rotate 生成新令牌（重启服务后生效）
   service  install / uninstall：安装为 systemd 服务并开机自启（见 tailproxy service -h）
+  relay    在出口机器（VPS）上运行中继，客户端经 tailnet 用它出网（见 tailproxy relay -h）
   version  打印版本
 
 start / run 的参数：
@@ -75,6 +78,8 @@ func main() {
 		err = cmdToken(args)
 	case "service":
 		err = cmdService(args)
+	case "relay":
+		err = cmdRelay(args)
 	case "version", "--version", "-version":
 		fmt.Println(version)
 	case "help", "-h", "--help":

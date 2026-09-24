@@ -95,6 +95,7 @@ const STATE_TEXT = {
   not_implemented: "未实现", not_running: "未运行",
   starting: "启动中", needs_login: "需要登录", needs_machine_auth: "等待批准",
   exit_node_pending: "等待出口节点", exit_node_offline: "出口节点离线", stopped: "已停止", error: "错误",
+  no_token: "缺少令牌", unreachable: "连不上中继", auth_failed: "令牌错误",
 };
 
 function stateBadge(state) {
@@ -139,7 +140,8 @@ function safeHttpsLink(url, text) {
 
 let egressState = { configured: [], runtime: [], revision: "" };
 let tailnetState = { account: null, peers: null };
-let addingFor = null; // peer id whose "添加为出口" form is open
+let addingFor = null; // {id, mode: "exit" | "relay"} of the open "添加" form
+let tokenFor = null;  // relay egress whose "更新令牌" form is open
 
 function egressMsg(text, kind) {
   const b = $("egress-msg");
@@ -173,7 +175,7 @@ async function loadEgress() {
   $("egress-detail").hidden = !e.detail;
   renderAccount();
   if (addingFor === null) renderPeers();
-  renderEgressList();
+  if (tokenFor === null) renderEgressList();
 }
 
 function renderAccount() {
@@ -272,43 +274,97 @@ function renderPeers() {
   }
 }
 
+function peerIPv4(p) {
+  return (p.tailscale_ips || []).find((ip) => /^\d+\.\d+\.\d+\.\d+$/.test(ip)) || "";
+}
+
+async function putRelayToken(name, token) {
+  await api(`/api/v1/egress/${encodeURIComponent(name)}/relay-token`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
+}
+
 function peerActions(p) {
   const td = el("td");
   if (p.tailproxy) {
     td.append(el("span", p.tailproxy === "main" ? "tailproxy 主节点" : `tailproxy 出口 ${p.tailproxy} 的设备`, "muted"));
     return td;
   }
-  if (p.used_by && p.used_by.length) {
-    td.append(el("span", "已作为出口：" + p.used_by.join(", ")));
+  if (p.used_by && p.used_by.length) td.append(el("div", "出口节点：" + p.used_by.join(", ")));
+  if (p.relay_for && p.relay_for.length) td.append(el("div", "中继：" + p.relay_for.join(", ")));
+  if (!addingFor || addingFor.id !== p.id) {
+    const row = el("div", null, "row compact");
+    if (p.exit_node_option) {
+      const b = el("button", "添加为出口节点", "secondary");
+      b.type = "button";
+      b.title = "tailproxy 为它单独登录一台设备 tailproxy-<名称>，通过 Tailscale 出口节点转发";
+      b.addEventListener("click", () => { addingFor = { id: p.id, mode: "exit" }; renderPeers(); });
+      row.append(b);
+    }
+    if (peerIPv4(p)) {
+      const b = el("button", "添加为中继", "secondary");
+      b.type = "button";
+      b.title = "该设备上运行 tailproxy relay：只用主节点一台设备，不需要开启出口节点";
+      b.addEventListener("click", () => { addingFor = { id: p.id, mode: "relay" }; renderPeers(); });
+      row.append(b);
+    }
+    if (row.childElementCount) td.append(row);
+    else if (!td.childElementCount) td.append(el("span", "—", "muted"));
     return td;
   }
-  if (!p.exit_node_option) {
-    td.append(el("span", "—", "muted"));
-    return td;
-  }
-  if (addingFor !== p.id) {
-    const b = el("button", "添加为出口", "secondary");
-    b.type = "button";
-    b.addEventListener("click", () => { addingFor = p.id; renderPeers(); });
-    td.append(b);
-    return td;
-  }
+  const relay = addingFor.mode === "relay";
   const form = el("form", null, "row compact");
   const name = el("input");
   name.value = suggestName(p);
   name.setAttribute("aria-label", "出口名称");
-  name.title = "出口名称：小写字母、数字和 -，会用在规则里和设备名 tailproxy-<名称>";
+  name.title = relay ? "出口名称：小写字母、数字和 -，会用在规则里" : "出口名称：小写字母、数字和 -，会用在规则里和设备名 tailproxy-<名称>";
+  form.append(name);
+  let port, token;
+  if (relay) {
+    port = el("input");
+    port.type = "number"; port.min = "1"; port.max = "65535"; port.value = "1081";
+    port.className = "port";
+    port.setAttribute("aria-label", "中继端口");
+    port.title = "tailproxy relay 的端口（默认 1081）";
+    token = el("input");
+    token.type = "password"; token.autocomplete = "off"; token.required = true;
+    token.placeholder = "中继令牌";
+    token.setAttribute("aria-label", "中继令牌");
+    token.title = "在该设备上执行 tailproxy relay token 查看";
+    form.append(port, token);
+  }
   const ok = el("button", "添加");
   ok.type = "submit";
   const cancel = el("button", "取消", "secondary");
   cancel.type = "button";
   cancel.addEventListener("click", () => { addingFor = null; renderPeers(); });
-  form.append(name, ok, cancel);
+  form.append(ok, cancel);
+  if (relay) form.append(el("div", "先在该设备上运行 tailproxy relay（或 tailproxy service install --relay），令牌用 tailproxy relay token 查看。", "muted hint"));
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
+    const n = name.value.trim();
     const list = egressState.configured.slice();
-    list.push({ name: name.value.trim(), exit_node: p.hostname || p.name });
-    if (await saveEgress(list, `已添加出口 ${name.value.trim()} → ${p.name}`)) addingFor = null;
+    if (!relay) {
+      list.push({ name: n, exit_node: p.hostname || p.name });
+      if (await saveEgress(list, `已添加出口 ${n} → ${p.name}（出口节点）`)) addingFor = null;
+      return;
+    }
+    const addr = `${peerIPv4(p)}:${port.value.trim() || "1081"}`;
+    const tok = token.value.trim();
+    if (tok.length < 16) { egressMsg("中继令牌至少 16 个字符（在该设备上执行 tailproxy relay token 查看）", "error"); return; }
+    list.push({ name: n, relay: addr });
+    if (!(await saveEgress(list, `已添加中继出口 ${n} → ${p.name}（${addr}）`))) return;
+    addingFor = null;
+    try {
+      await putRelayToken(n, tok);
+      egressMsg(`已添加中继出口 ${n} → ${p.name}（${addr}），正在连接中继`, "ok");
+    } catch (err) {
+      if (err instanceof AuthError) { authFailed(); return; }
+      egressMsg(`出口 ${n} 已添加，但保存令牌失败：${err.message}。可以在「已配置的出口」里重新填写令牌。`, "error");
+    }
+    await loadEgress().catch(() => {});
   });
   td.append(form);
   setTimeout(() => name.focus(), 0);
@@ -322,7 +378,7 @@ function renderEgressList() {
   const tb = $("egress-list");
   tb.replaceChildren();
   if (!e.configured || e.configured.length === 0) {
-    const tr = el("tr"); const td = el("td", "还没有出口。登录后在上面的设备列表里点「添加为出口」。", "muted"); td.colSpan = 6; tr.append(td); tb.append(tr);
+    const tr = el("tr"); const td = el("td", "还没有出口。登录后在上面的设备列表里点「添加为出口节点」或「添加为中继」。", "muted"); td.colSpan = 6; tr.append(td); tb.append(tr);
     return;
   }
   const exitPeers = (tailnetState.peers || []).filter((p) => p.exit_node_option && !p.tailproxy);
@@ -330,12 +386,16 @@ function renderEgressList() {
     const r = rt[x.name];
     const tr = el("tr");
     tr.append(el("td", x.name));
-    tr.append(el("td", x.type ? (x.type === "fallback" ? "组：故障转移" : "组：延迟优选") : "出口"));
+    tr.append(el("td", x.type ? (x.type === "fallback" ? "组：故障转移" : "组：延迟优选") : x.relay ? "中继" : "出口节点"));
     const target = el("td");
     if (x.type) {
       target.append(el("div", (x.members || []).join(", ")));
       if (r && r.selected) target.append(el("div", "当前使用：" + r.selected, "muted"));
       if (x.health_check) target.append(el("div", `健康检查 ${x.health_check.url} / ${x.health_check.interval}`, "muted"));
+    } else if (x.relay) {
+      target.append(el("div", x.relay));
+      const peer = (tailnetState.peers || []).find((p) => (p.relay_for || []).includes(x.name));
+      if (peer) target.append(el("div", `${peer.name}（${peer.online ? "在线" : "离线"}）`, "muted"));
     } else {
       target.append(el("div", x.exit_node));
       const en = r && r.exit_node;
@@ -353,12 +413,47 @@ function renderEgressList() {
     tr.append(st);
     const info = el("td", null, "muted");
     if (r && r.hostname) info.append(el("div", r.hostname));
+    if (x.relay) info.append(el("div", r && r.token_source ? (r.token_source === "file" ? "令牌：已保存" : `令牌：环境变量 $${r.token_source.slice(4)}`) : "令牌：未设置"));
     if (r && r.tailscale_ips && r.tailscale_ips.length) info.append(el("div", r.tailscale_ips[0]));
     if (r && r.health) info.append(el("div", r.health.ok ? `健康 ✓ ${r.health.rtt_ms.toFixed(0)} ms` : `健康 ✗ ${r.health.error || ""}`));
     tr.append(info);
 
     const act = el("td");
-    if (!x.type) {
+    if (x.relay) {
+      if (tokenFor === x.name) {
+        const f = el("form", null, "row compact");
+        const inp = el("input");
+        inp.type = "password"; inp.autocomplete = "off"; inp.placeholder = "新的中继令牌"; inp.required = true;
+        inp.setAttribute("aria-label", `出口 ${x.name} 的中继令牌`);
+        const save = el("button", "保存");
+        save.type = "submit";
+        const cancel = el("button", "取消", "secondary");
+        cancel.type = "button";
+        cancel.addEventListener("click", () => { tokenFor = null; renderEgressList(); });
+        f.append(inp, save, cancel);
+        f.addEventListener("submit", async (ev) => {
+          ev.preventDefault();
+          try {
+            await putRelayToken(x.name, inp.value.trim());
+            tokenFor = null;
+            egressMsg(`出口 ${x.name} 的中继令牌已保存，正在重新连接`, "ok");
+            await loadEgress();
+          } catch (err) {
+            if (err instanceof AuthError) { authFailed(); return; }
+            egressMsg("保存令牌失败：" + err.message, "error");
+          }
+        });
+        act.append(f);
+        setTimeout(() => inp.focus(), 0);
+      } else {
+        const b = el("button", "更新令牌", "secondary");
+        b.type = "button";
+        b.disabled = !!(r && r.token_source && r.token_source.startsWith("env:"));
+        b.title = b.disabled ? "令牌来自环境变量（relay_token_env），请在环境里修改" : "在中继设备上执行 tailproxy relay token 查看令牌";
+        b.addEventListener("click", () => { tokenFor = x.name; renderEgressList(); });
+        act.append(b);
+      }
+    } else if (!x.type) {
       const sel = el("select");
       sel.setAttribute("aria-label", `出口 ${x.name} 使用的节点`);
       const cur = new Option(`${x.exit_node}（当前）`, x.exit_node);
@@ -378,10 +473,11 @@ function renderEgressList() {
     const del = el("button", "删除", "danger icon");
     del.type = "button";
     del.addEventListener("click", async () => {
-      if (!confirm(`删除出口 ${x.name}？\n${x.type ? "" : `它对应的设备 tailproxy-${x.name} 会从 tailnet 注销，本地状态也会删除。\n`}仍在使用它的规则或出口组需要先改掉，否则保存会失败。`)) return;
+      const what = x.type ? "" : x.relay ? "本地保存的中继令牌会一起删除（中继设备本身不受影响）。\n" : `它对应的设备 tailproxy-${x.name} 会从 tailnet 注销，本地状态也会删除。\n`;
+      if (!confirm(`删除出口 ${x.name}？\n${what}仍在使用它的规则或出口组需要先改掉，否则保存会失败。`)) return;
       await saveEgress(egressState.configured.filter((_, j) => j !== idx), `已删除出口 ${x.name}`);
     });
-    act.append(del);
+    if (tokenFor !== x.name) act.append(del);
     tr.append(act);
     tb.append(tr);
   });

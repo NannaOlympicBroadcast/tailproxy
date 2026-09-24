@@ -22,6 +22,9 @@ type Paths struct {
 	State string // tailproxy.json: the running instance
 	Log   string // tailproxy.log: output of the background process
 	Token string // tailproxy.token: persisted panel token (kept across restarts)
+	// RelayToken is relay.token: the token of `tailproxy relay` on this
+	// machine, which clients use to reach it.
+	RelayToken string
 }
 
 // DefaultDir returns ~/.lighthousepro.
@@ -40,6 +43,8 @@ func NewPaths(dir string) Paths {
 		State: filepath.Join(dir, "tailproxy.json"),
 		Log:   filepath.Join(dir, "tailproxy.log"),
 		Token: filepath.Join(dir, "tailproxy.token"),
+
+		RelayToken: filepath.Join(dir, "relay.token"),
 	}
 }
 

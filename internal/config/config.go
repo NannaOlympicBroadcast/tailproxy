@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -67,7 +68,17 @@ type Egress struct {
 	// DoH overrides dns.per_egress_doh for this slot, e.g. a resolver that
 	// works well from the exit node's country. The host must be an IP.
 	DoH string `yaml:"doh,omitempty" json:"doh,omitempty"`
+	// Relay, instead of exit_node, sends this egress's traffic through a
+	// `tailproxy relay` at host:port on the tailnet (e.g. 100.98.60.52:1081).
+	// Relays need no extra tailnet device on this side.
+	Relay string `yaml:"relay,omitempty" json:"relay,omitempty"`
+	// RelayTokenEnv names an environment variable holding the relay token;
+	// otherwise the token is read from <state-dir>/relay/<name>.token.
+	RelayTokenEnv string `yaml:"relay_token_env,omitempty" json:"relay_token_env,omitempty"`
 }
+
+// IsRelay reports whether e goes through a tailproxy relay.
+func (e Egress) IsRelay() bool { return e.Type == "" && e.Relay != "" }
 
 // IsGroup reports whether e is a group of other egress slots.
 func (e Egress) IsGroup() bool { return e.Type != "" }
@@ -185,16 +196,29 @@ func (c *Config) Validate() error {
 		names[e.Name] = true
 		switch e.Type {
 		case "":
-			if e.ExitNode == "" {
-				errs = append(errs, fmt.Errorf("egress %q: exit_node is required", e.Name))
+			switch {
+			case e.Relay != "" && e.ExitNode != "":
+				errs = append(errs, fmt.Errorf("egress %q: set either exit_node or relay, not both", e.Name))
+			case e.Relay != "":
+				if err := checkRelayAddr(e.Relay); err != nil {
+					errs = append(errs, fmt.Errorf("egress %q: relay: %w", e.Name, err))
+				}
+				if e.DoH != "" {
+					errs = append(errs, fmt.Errorf("egress %q: doh is not used with relay (the relay resolves names itself)", e.Name))
+				}
+			case e.ExitNode == "":
+				errs = append(errs, fmt.Errorf("egress %q: exit_node or relay is required", e.Name))
+			}
+			if e.RelayTokenEnv != "" && e.Relay == "" {
+				errs = append(errs, fmt.Errorf("egress %q: relay_token_env needs relay", e.Name))
 			}
 			slots[e.Name] = true
 		case "fallback", "latency":
 			if e.DoH != "" {
 				errs = append(errs, fmt.Errorf("egress %q: doh is set per slot, not on a group", e.Name))
 			}
-			if e.ExitNode != "" {
-				errs = append(errs, fmt.Errorf("egress %q: a group cannot set exit_node", e.Name))
+			if e.ExitNode != "" || e.Relay != "" {
+				errs = append(errs, fmt.Errorf("egress %q: a group cannot set exit_node or relay", e.Name))
 			}
 			if len(e.Members) == 0 {
 				errs = append(errs, fmt.Errorf("egress %q: group needs members", e.Name))
@@ -214,7 +238,7 @@ func (c *Config) Validate() error {
 	for _, e := range c.Egress {
 		for _, m := range e.Members {
 			if !slots[m] {
-				errs = append(errs, fmt.Errorf("egress %q: member %q is not a defined slot", e.Name, m))
+				errs = append(errs, fmt.Errorf("egress %q: member %q is not a defined exit (slot or relay)", e.Name, m))
 			}
 		}
 	}
@@ -293,6 +317,22 @@ func validEgressName(n string) bool {
 
 // ValidEgressName reports whether n is usable as an egress name.
 func ValidEgressName(n string) bool { return validEgressName(n) }
+
+// checkRelayAddr requires host:port with a numeric port. The host may be a
+// Tailscale IP or MagicDNS name, or loopback for a relay on the same machine.
+func checkRelayAddr(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("%q: want host:port, e.g. 100.98.60.52:1081", addr)
+	}
+	if host == "" {
+		return fmt.Errorf("%q: missing host", addr)
+	}
+	if p, err := strconv.Atoi(port); err != nil || p < 1 || p > 65535 {
+		return fmt.Errorf("%q: invalid port", addr)
+	}
+	return nil
+}
 
 // checkDoHURL requires https:// with an IP-literal host, so resolving a name
 // through an exit node never needs a lookup outside that exit node.
