@@ -27,9 +27,25 @@ import (
 //go:embed static
 var staticFS embed.FS
 
-// egressNotRunning explains why no runtime egress state exists yet: the tsnet
+// egressNotRunning is shown when the panel runs without a Runtime (tests,
+// or a build without the egress manager): the tsnet
 // slot manager (DESIGN §4.4, milestone M0) is not part of this build.
-const egressNotRunning = "出口管理器（tsnet 槽位）尚未实现，当前构建只包含 Web 面板、配置加载和规则引擎；这里只列出配置中的出口"
+const egressNotRunning = "出口管理器没有运行，这里只列出配置中的出口"
+
+// Component is one entry of the panel's component list.
+type Component struct {
+	Name   string `json:"name"`
+	State  string `json:"state"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// Runtime exposes the running proxy (egress manager, inbounds, connection
+// tracker) to the panel. Values returned are serialized as JSON.
+type Runtime interface {
+	Components() []Component
+	Egress() any
+	Connections() any
+}
 
 // Server is the web panel. Create it with New and run it with ListenAndServe.
 type Server struct {
@@ -45,6 +61,7 @@ type Server struct {
 	tokenFile    string
 	tokenCreated bool // tokenFile did not exist and was created by this run
 	loopback     bool // panel.listen is a loopback address
+	runtime      Runtime
 
 	bound atomic.Pointer[string] // actual listen address once Listen succeeded
 
@@ -69,6 +86,9 @@ type Options struct {
 	// and written there (mode 0600) if the file does not exist, so the token
 	// survives restarts. Empty means a one-off token for this run only.
 	TokenFile string
+
+	// Runtime, if set, provides live egress state and connections.
+	Runtime Runtime
 }
 
 // New loads the configuration at cfgPath and prepares the panel. Access
@@ -76,7 +96,7 @@ type Options struct {
 // named by panel.auth_token_env (if set and non-empty), opts.TokenFile, or a
 // random token generated for this run.
 func New(cfgPath, version string, opts Options) (*Server, error) {
-	s := &Server{cfgPath: cfgPath, version: version, started: time.Now()}
+	s := &Server{cfgPath: cfgPath, version: version, started: time.Now(), runtime: opts.Runtime}
 	if err := s.loadFromDisk(); err != nil {
 		return nil, err
 	}
@@ -203,6 +223,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/config", s.auth(s.handleConfig))
 	mux.HandleFunc("POST /api/v1/config/reload", s.auth(s.handleReload))
 	mux.HandleFunc("GET /api/v1/egress", s.auth(s.handleEgress))
+	mux.HandleFunc("GET /api/v1/connections", s.auth(s.handleConnections))
 	mux.HandleFunc("GET /api/v1/rules", s.auth(s.handleRules))
 	mux.HandleFunc("PUT /api/v1/rules", s.auth(s.handleRulesPut))
 	mux.HandleFunc("POST /api/v1/rules/test", s.auth(s.handleRuleTest))
@@ -269,15 +290,23 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"rules":          engine.Len(),
 		"egress_slots":   slots,
 		"egress_groups":  groups,
-		"components": []map[string]string{
-			{"name": "panel", "state": "running"},
-			{"name": "config", "state": "loaded"},
-			{"name": "rule_engine", "state": "ready"},
-			{"name": "egress_manager", "state": "not_implemented", "detail": egressNotRunning},
-			{"name": "capture", "state": "not_implemented", "detail": "TUN / TPROXY / SOCKS 捕获层尚未实现（DESIGN §4.1）"},
-			{"name": "dns", "state": "not_implemented", "detail": "FakeIP / 分流 DNS 尚未实现（DESIGN §4.2、§4.8）"},
-		},
+		"components":     s.components(),
 	})
+}
+
+func (s *Server) components() []Component {
+	out := []Component{
+		{Name: "panel", State: "running"},
+		{Name: "config", State: "loaded"},
+		{Name: "rule_engine", State: "ready"},
+	}
+	if s.runtime != nil {
+		return append(out, s.runtime.Components()...)
+	}
+	return append(out,
+		Component{Name: "egress_manager", State: "not_running", Detail: egressNotRunning},
+		Component{Name: "capture", State: "not_running"},
+	)
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -319,19 +348,55 @@ func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
 	s.reloadsOK.Add(1)
 	cfg, engine, _ := s.snapshot()
 	resp := map[string]any{"ok": true, "rules": engine.Len()}
+	var restart []string
 	if cfg.Panel != old.Panel {
-		resp["warning"] = "panel 配置的变更需要重启 tailproxy 才会生效"
+		restart = append(restart, "panel")
+	}
+	if !sameJSON(cfg.Egress, old.Egress) || !sameJSON(cfg.Tailnet, old.Tailnet) {
+		restart = append(restart, "egress / tailnet")
+	}
+	if !sameJSON(cfg.Capture, old.Capture) || !sameJSON(cfg.DNS, old.DNS) {
+		restart = append(restart, "capture / dns")
+	}
+	if len(restart) > 0 {
+		resp["warning"] = "规则已生效；" + strings.Join(restart, "、") + " 配置的变更需要重启 tailproxy 才会生效"
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleEgress(w http.ResponseWriter, r *http.Request) {
 	cfg, _, _ := s.snapshot()
-	writeJSON(w, http.StatusOK, map[string]any{
-		"configured": cfg.Egress,
-		"runtime":    nil,
-		"detail":     egressNotRunning,
-	})
+	if s.runtime == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"configured": cfg.Egress, "runtime": nil, "detail": egressNotRunning})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"configured": cfg.Egress, "runtime": s.runtime.Egress()})
+}
+
+func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request) {
+	if s.runtime == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "proxy is not running"})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.runtime.Connections())
+}
+
+// SetRuntime attaches the running proxy. Call it before serving.
+func (s *Server) SetRuntime(rt Runtime) { s.runtime = rt }
+
+// Config returns the currently loaded configuration.
+func (s *Server) Config() *config.Config {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cfg
+}
+
+// Engine returns the current rule engine. It changes when rules are saved
+// or the config is reloaded, so callers should fetch it per connection.
+func (s *Server) Engine() *rule.Engine {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.engine
 }
 
 func (s *Server) handleRules(w http.ResponseWriter, r *http.Request) {

@@ -119,3 +119,8 @@ body.locked nav, body.locked .tab, body.locked #logout { display: none; }
 #logout { padding: 5px 12px; }
 #login { max-width: 460px; margin: 48px auto; }
 .login-error { color: var(--err-text); margin: 0 0 8px; }
+.state.idle, .state.disabled, .state.starting, .state.stopped { color: var(--muted); }
+.state.needs_login, .state.needs_machine_auth, .state.exit_node_pending, .state.exit_node_offline, .state.degraded { color: var(--warn-text); background: var(--warn-bg); border-color: transparent; }
+.state.error { color: var(--err-text); background: var(--err-bg); border-color: transparent; }
+.conn-error { color: var(--err-text); word-break: break-word; }
+a { color: var(--accent); }

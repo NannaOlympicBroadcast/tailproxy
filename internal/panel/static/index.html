@@ -13,6 +13,7 @@
     <a href="#overview" data-tab="overview">概览</a>
     <a href="#egress" data-tab="egress">出口</a>
     <a href="#rules" data-tab="rules">规则</a>
+    <a href="#connections" data-tab="connections">连接</a>
     <a href="#config" data-tab="config">配置</a>
   </nav>
   <button id="logout" type="button" class="secondary">退出</button>
@@ -56,8 +57,22 @@
   <section id="egress" class="tab" hidden>
     <div class="banner warn" id="egress-detail"></div>
     <div class="card">
-      <h2>已配置的出口</h2>
-      <table><thead><tr><th>名称</th><th>类型</th><th>出口节点 / 成员</th><th>健康检查</th><th>运行状态</th></tr></thead><tbody id="egress-list"></tbody></table>
+      <h2>出口</h2>
+      <p class="muted">每个槽位是一个独立的 tailnet 设备（主机名 tailproxy-&lt;名称&gt;），固定使用一个出口节点。没有配置 auth key 时，需要打开登录链接把它加入你的 tailnet。</p>
+      <table><thead><tr><th>名称</th><th>类型</th><th>出口节点 / 成员</th><th>状态</th><th>设备 / 健康</th></tr></thead><tbody id="egress-list"></tbody></table>
+    </div>
+  </section>
+
+  <section id="connections" class="tab" hidden>
+    <div class="card">
+      <h2>连接</h2>
+      <p id="conn-summary" class="muted"></p>
+      <h2>活动连接</h2>
+      <table><thead><tr><th>开始</th><th>目的地 / 来源</th><th>命中规则</th><th>目标 → 经由</th><th>流量</th><th>状态</th></tr></thead><tbody id="conn-active"></tbody></table>
+    </div>
+    <div class="card">
+      <h2>最近结束的连接</h2>
+      <table><thead><tr><th>开始</th><th>目的地 / 来源</th><th>命中规则</th><th>目标 → 经由</th><th>流量</th><th>结果</th></tr></thead><tbody id="conn-recent"></tbody></table>
     </div>
   </section>
 

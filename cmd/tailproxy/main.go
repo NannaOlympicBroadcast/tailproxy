@@ -17,13 +17,16 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
 	"time"
 
+	"github.com/NannaOlympicBroadcast/tailproxy/internal/egress"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/panel"
+	"github.com/NannaOlympicBroadcast/tailproxy/internal/proxy"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/service"
 )
 
@@ -224,6 +227,26 @@ func cmdRun(args []string) (err error) {
 	}
 	defer ln.Close()
 
+	// Egress slots and the SOCKS5 inbound. Listeners are bound before
+	// readiness is reported, so a busy port fails `tailproxy start`.
+	cfg := p.Config()
+	mgr, err := egress.New(cfg, f.paths.Dir, log.Printf)
+	if err != nil {
+		return err
+	}
+	tracker := proxy.NewTracker()
+	router := &proxy.Router{Rules: p.Engine, Egress: mgr, Tracker: tracker}
+	rt := &runtimeView{egress: mgr, tracker: tracker}
+	var socksLn net.Listener
+	if cfg.Capture.SocksListen != "" {
+		if socksLn, err = proxy.ListenSOCKS(cfg.Capture.SocksListen); err != nil {
+			return err
+		}
+		defer socksLn.Close()
+		rt.socksAddr = socksLn.Addr().String()
+	}
+	p.SetRuntime(rt)
+
 	st := service.State{PID: os.Getpid(), URL: p.URL(), Config: f.config, TokenEnv: p.TokenEnv(), TokenFile: p.TokenFile(), Started: time.Now()}
 	underSystemd := service.UnderSystemd()
 	if underSystemd {
@@ -239,7 +262,7 @@ func cmdRun(args []string) (err error) {
 	defer f.paths.Cleanup(os.Getpid())
 
 	ready := service.Ready{
-		OK: true, PID: st.PID, URL: p.URL(), Listen: ln.Addr().String(),
+		OK: true, PID: st.PID, URL: p.URL(), Listen: ln.Addr().String(), SOCKS: rt.socksAddr,
 		TokenEnv: p.TokenEnv(), TokenFile: p.TokenFile(), TokenCreated: p.TokenCreated(), Log: st.Log,
 	}
 	if p.TokenEnv() == "" {
@@ -268,6 +291,16 @@ func cmdRun(args []string) (err error) {
 		<-ctx.Done()
 		service.Notify("STOPPING=1")
 	}()
+	mgr.Start(ctx)
+	defer mgr.Close()
+	if socksLn != nil {
+		socks := &proxy.SOCKS{Router: router, Logf: log.Printf}
+		go func() {
+			if err := socks.Serve(ctx, socksLn); err != nil {
+				log.Printf("tailproxy: socks5: %v", err)
+			}
+		}()
+	}
 	if err := p.Serve(ctx, ln); err != nil {
 		return fmt.Errorf("panel: %w", err)
 	}
@@ -397,6 +430,9 @@ func cmdToken(args []string) error {
 func printBanner(w io.Writer, r service.Ready) {
 	fmt.Fprintf(w, "\ntailproxy %s\n", version)
 	fmt.Fprintf(w, "  面板地址：%s（监听 %s）\n", r.URL, r.Listen)
+	if r.SOCKS != "" {
+		fmt.Fprintf(w, "  SOCKS5： %s\n", r.SOCKS)
+	}
 	if r.TokenEnv != "" {
 		fmt.Fprintf(w, "  访问令牌：来自环境变量 $%s（不在终端显示）\n\n", r.TokenEnv)
 		return

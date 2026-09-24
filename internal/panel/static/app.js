@@ -69,7 +69,7 @@ function showLogin(show, message) {
 
 function currentTab() {
   const h = location.hash.replace("#", "");
-  return ["overview", "egress", "rules", "config"].includes(h) ? h : "overview";
+  return ["overview", "egress", "rules", "connections", "config"].includes(h) ? h : "overview";
 }
 
 function selectTab(name) {
@@ -91,8 +91,10 @@ function fmtTime(iso) {
 }
 
 const STATE_TEXT = {
-  running: "运行中", loaded: "已加载", ready: "就绪",
+  running: "运行中", loaded: "已加载", ready: "就绪", idle: "空闲", disabled: "未启用", degraded: "部分就绪",
   not_implemented: "未实现", not_running: "未运行",
+  starting: "启动中", needs_login: "需要登录", needs_machine_auth: "等待批准",
+  exit_node_pending: "等待出口节点", exit_node_offline: "出口节点离线", stopped: "已停止", error: "错误",
 };
 
 function stateBadge(state) {
@@ -124,10 +126,21 @@ async function loadStatus() {
   }
 }
 
+function safeHttpsLink(url, text) {
+  if (!/^https:\/\//.test(url || "")) return el("span", url || "");
+  const a = el("a", text || url);
+  a.href = url;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  return a;
+}
+
 async function loadEgress() {
   const e = await api("/api/v1/egress");
   $("egress-detail").textContent = e.detail || "";
   $("egress-detail").hidden = !e.detail;
+  const rt = {};
+  for (const r of e.runtime || []) rt[r.name] = r;
   const tb = $("egress-list");
   tb.replaceChildren();
   if (!e.configured || e.configured.length === 0) {
@@ -135,14 +148,84 @@ async function loadEgress() {
     return;
   }
   for (const x of e.configured) {
+    const r = rt[x.name];
     const tr = el("tr");
     tr.append(el("td", x.name));
     tr.append(el("td", x.type ? (x.type === "fallback" ? "组：故障转移" : "组：延迟优选") : "槽位"));
-    tr.append(el("td", x.type ? (x.members || []).join(", ") : x.exit_node));
-    tr.append(el("td", x.health_check ? `${x.health_check.url} / ${x.health_check.interval}` : "—", "muted"));
-    const st = el("td"); st.append(stateBadge(e.runtime ? e.runtime[x.name] : "not_running")); tr.append(st);
+    const target = el("td");
+    if (x.type) {
+      target.append(el("div", (x.members || []).join(", ")));
+      if (r && r.selected) target.append(el("div", "当前使用：" + r.selected, "muted"));
+      if (x.health_check) target.append(el("div", `健康检查 ${x.health_check.url} / ${x.health_check.interval}`, "muted"));
+    } else {
+      target.append(el("div", x.exit_node));
+      const en = r && r.exit_node;
+      if (en && en.name) target.append(el("div", `${en.name}（${en.online ? "在线" : "离线"}）`, "muted"));
+    }
+    tr.append(target);
+    const st = el("td");
+    st.append(stateBadge(r ? r.state : "not_running"));
+    if (r && r.detail) st.append(el("div", r.detail, "muted"));
+    if (r && r.auth_url) {
+      const d = el("div");
+      d.append(safeHttpsLink(r.auth_url, "打开 Tailscale 登录链接"));
+      st.append(d);
+    }
+    tr.append(st);
+    const info = el("td", null, "muted");
+    if (r && r.hostname) info.append(el("div", r.hostname));
+    if (r && r.tailscale_ips && r.tailscale_ips.length) info.append(el("div", r.tailscale_ips.join(" ")));
+    if (r && r.health) {
+      const h = r.health;
+      info.append(el("div", h.ok ? `健康 ✓ ${h.rtt_ms.toFixed(0)} ms` : `健康 ✗ ${h.error || ""}`));
+    }
+    tr.append(info);
     tb.append(tr);
   }
+}
+
+function fmtBytes(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+  if (n < 1073741824) return (n / 1048576).toFixed(1) + " MB";
+  return (n / 1073741824).toFixed(2) + " GB";
+}
+
+function connRow(c, active) {
+  const tr = el("tr");
+  tr.append(el("td", new Date(c.started).toLocaleTimeString()));
+  const dst = el("td");
+  dst.append(el("div", `${c.host}:${c.port}`));
+  dst.append(el("div", `${c.inbound} ${c.source}`, "muted"));
+  tr.append(dst);
+  tr.append(el("td", c.rule_index >= 0 ? `#${c.rule_index} ${c.reason}` : c.reason));
+  tr.append(el("td", c.via && c.via !== c.target ? `${c.target} → ${c.via}` : c.target));
+  tr.append(el("td", `↑ ${fmtBytes(c.up)}  ↓ ${fmtBytes(c.down)}`));
+  const st = el("td");
+  if (active) st.append(stateBadge("running"));
+  else if (c.error) st.append(el("span", c.error, "conn-error"));
+  else st.append(el("span", "已结束", "muted"));
+  tr.append(st);
+  return tr;
+}
+
+async function loadConnections() {
+  let d;
+  try {
+    d = await api("/api/v1/connections");
+  } catch (err) {
+    if (err instanceof AuthError) throw err;
+    $("conn-summary").textContent = "代理未运行：" + err.message;
+    return;
+  }
+  $("conn-summary").textContent = `活动 ${d.active.length} 条，累计 ${d.total} 条，失败 ${d.failed} 条（最近结束的保留 200 条）`;
+  const a = $("conn-active"), r = $("conn-recent");
+  a.replaceChildren();
+  r.replaceChildren();
+  for (const c of d.active) a.append(connRow(c, true));
+  for (const c of d.recent) r.append(connRow(c, false));
+  if (!d.active.length) { const tr = el("tr"); const td = el("td", "没有活动连接", "muted"); td.colSpan = 6; tr.append(td); a.append(tr); }
+  if (!d.recent.length) { const tr = el("tr"); const td = el("td", "还没有连接记录", "muted"); td.colSpan = 6; tr.append(td); r.append(tr); }
 }
 
 const COND_LABELS = [
@@ -197,7 +280,7 @@ function authFailed() {
 async function refresh() {
   if (!token) { showLogin(true); return; }
   try {
-    await Promise.all([loadStatus(), loadEgress(), loadRules(), loadConfig()]);
+    await Promise.all([loadStatus(), loadEgress(), loadRules(), loadConfig(), loadConnections()]);
     showError("");
     showLogin(false);
   } catch (err) {
@@ -492,4 +575,11 @@ window.addEventListener("beforeunload", (ev) => {
 
 window.addEventListener("hashchange", () => { if ($("login").hidden) selectTab(currentTab()); });
 refresh();
-setInterval(() => { if ($("login").hidden && !document.hidden) loadStatus().catch(() => {}); }, 5000);
+setInterval(() => {
+  if (!$("login").hidden || document.hidden) return;
+  loadStatus().catch(() => {});
+  if (currentTab() === "egress") loadEgress().catch(() => {});
+}, 5000);
+setInterval(() => {
+  if ($("login").hidden && !document.hidden && currentTab() === "connections") loadConnections().catch(() => {});
+}, 2000);

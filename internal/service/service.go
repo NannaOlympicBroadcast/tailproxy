@@ -145,6 +145,7 @@ type Ready struct {
 	PID          int    `json:"pid,omitempty"`
 	URL          string `json:"url,omitempty"`
 	Listen       string `json:"listen,omitempty"`
+	SOCKS        string `json:"socks,omitempty"`
 	LoginURL     string `json:"login_url,omitempty"`
 	Token        string `json:"token,omitempty"` // omitted when it comes from the environment
 	TokenEnv     string `json:"token_env,omitempty"`

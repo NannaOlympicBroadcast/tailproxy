@@ -16,6 +16,7 @@ func TestUnitSystem(t *testing.T) {
 		"User=alice\n",
 		"ReadWritePaths=/etc/tailproxy /home/alice/.lighthousepro\n",
 		"ProtectSystem=strict",
+		"EnvironmentFile=-/home/alice/.lighthousepro/tailproxy.env\n",
 		"After=network-online.target",
 		"WantedBy=multi-user.target",
 	} {
