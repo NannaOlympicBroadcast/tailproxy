@@ -45,6 +45,8 @@ type Server struct {
 	tokenEnv string
 	loopback bool // panel.listen is a loopback address
 
+	bound atomic.Pointer[string] // actual listen address once Listen succeeded
+
 	mu     sync.RWMutex
 	cfg    *config.Config
 	engine *rule.Engine
@@ -115,7 +117,11 @@ func (s *Server) TokenEnv() string { return s.tokenEnv }
 // URL returns a browser URL for the panel. An unspecified listen host
 // (0.0.0.0, ::, empty) is shown as 127.0.0.1.
 func (s *Server) URL() string {
-	host, port, _ := net.SplitHostPort(s.Addr())
+	addr := s.Addr()
+	if b := s.bound.Load(); b != nil {
+		addr = *b
+	}
+	host, port, _ := net.SplitHostPort(addr)
 	if ip, err := netip.ParseAddr(host); host == "" || (err == nil && ip.IsUnspecified()) {
 		host = "127.0.0.1"
 	}
@@ -145,11 +151,23 @@ func (s *Server) TailnetRequested() bool {
 
 // ListenAndServe serves the panel until ctx is cancelled.
 func (s *Server) ListenAndServe(ctx context.Context) error {
-	ln, err := net.Listen("tcp", s.Addr())
+	ln, err := s.Listen()
 	if err != nil {
 		return err
 	}
 	return s.Serve(ctx, ln)
+}
+
+// Listen binds panel.listen. Afterwards URL reports the actual address, which
+// matters when the configured port is 0.
+func (s *Server) Listen() (net.Listener, error) {
+	ln, err := net.Listen("tcp", s.Addr())
+	if err != nil {
+		return nil, fmt.Errorf("panel: listen %s: %w", s.Addr(), err)
+	}
+	addr := ln.Addr().String()
+	s.bound.Store(&addr)
+	return ln, nil
 }
 
 // Serve serves the panel on ln until ctx is cancelled.

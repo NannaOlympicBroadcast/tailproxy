@@ -218,8 +218,8 @@
 ### 4.9 控制面与「插件」接口〔无来源·设计决策〕
 
 - **配置文件**：YAML，支持热重载（规则和出口组可以热更新；槽位增删会触发对应 tsnet 节点的启停）。
-- **本地 API**：Unix socket 或 Windows 命名管道提供 REST 接口，用于查询连接列表、命中规则、槽位状态，以及临时切换出口。
-- **CLI**：`tailproxy up|down|status|test <domain|ip>`，其中 `test` 用于演练某个域名或 IP 会命中哪条规则。
+- **本地 API**：由 Web 面板端口（默认 7708）上的 REST 接口提供，所有请求都需要访问令牌；目前可查询状态、配置、出口和规则，保存规则、重新加载配置。连接列表、槽位运行状态和临时切换出口，要等出口管理器实现后再加。
+- **CLI**：`tailproxy start|run|stop|status|token`（已实现，见 README）。`start` 以后台进程运行，面板就绪后打印地址和令牌再退出前台；状态文件、日志和可选的令牌文件放在 `~/.lighthousepro`。规则演练目前在 Web 面板里做，`tailproxy test <domain|ip>` 尚未实现。
 - **扩展点**：① Rule Provider；② Capture 后端接口（`Capture` interface，新平台只需实现它）；③ 可选的「sing-box 配置导出」后端，用作 PoC 或对照。
 - **移动端**：Go 核心通过 gomobile 编译为 Android AAR / iOS xcframework，外层是平台原生 UI。〔无来源·待验证：iOS Network Extension 的内存上限能否容纳多个 tsnet 节点〕
 
@@ -234,7 +234,7 @@
 | 7893 | TCP+UDP | TPROXY 透明代理入口 | 仅 Linux TPROXY 模式 | 只接收 nft 标记后送来的流量，不对外暴露 | TPROXY 需要一个设置了 `IP_TRANSPARENT` 的监听套接字 [来源 S10]；端口号〔无来源·设计决策〕 |
 | 1080 | TCP+UDP | SOCKS5 / HTTP 兜底入口 | 可选，默认关闭 | `127.0.0.1:1080` | IANA 1080 = socks [来源 S44] |
 | 41642–41649 | UDP | 各 tsnet 槽位的 WireGuard 端口，每个槽位一个 | 否：默认 `Port=0` 自动选择；只有在需要固定防火墙规则时才启用这个范围 | 所有接口 | tsnet `Port` 为 0 时自动选择 [来源 S4]；系统 tailscaled 默认使用 41641，所以从 41642 开始，避免冲突 [来源 S47] |
-| —— | Unix socket / 命名管道 | 本地 CLI 控制通道 | 是 | 仅本机 | 〔无来源·设计决策〕，不占 TCP 端口 |
+| —— | 状态文件 + 信号 | 本地 CLI（`stop` / `status` / `token`）通过 `~/.lighthousepro` 下的状态文件和 SIGTERM 控制服务 | 是 | 仅本机 | 〔无来源·设计决策〕，不占 TCP 端口 |
 
 **入站**：正常情况下 Tailscale **不需要开放任何入站端口**，依靠 NAT 穿透即可；只有在网络环境比较差、直连失败时，才建议放行 WireGuard UDP 端口的入站，以减少走 DERP 中继的情况 [来源 S47]。
 
