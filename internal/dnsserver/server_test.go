@@ -267,3 +267,30 @@ func TestStripECHAndObserve(t *testing.T) {
 		t.Fatal("ech stripped without StripECH")
 	}
 }
+
+func TestListenRetriesEphemeralPort(t *testing.T) {
+	// Hold TCP ports so that some UDP picks collide; Listen must still
+	// return a UDP/TCP pair on one port.
+	for i := 0; i < 20; i++ {
+		pc, ln, err := Listen("127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pc.LocalAddr().String() != ln.Addr().String() {
+			t.Fatalf("udp %s, tcp %s", pc.LocalAddr(), ln.Addr())
+		}
+		defer pc.Close()
+		defer ln.Close()
+	}
+	// A fixed port that is taken for TCP fails without retrying elsewhere.
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
+	if pc, ln, err := Listen(busy.Addr().String()); err == nil {
+		pc.Close()
+		ln.Close()
+		t.Fatal("Listen on a taken fixed port succeeded")
+	}
+}

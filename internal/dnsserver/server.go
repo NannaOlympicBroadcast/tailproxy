@@ -72,18 +72,29 @@ func (s *Server) logf(format string, args ...any) {
 	}
 }
 
-// Listen binds UDP and TCP on addr.
+// Listen binds UDP and TCP on addr. With port 0, the port the system picks
+// for UDP may be taken (or, on Windows, reserved) for TCP; another port is
+// tried then.
 func Listen(addr string) (net.PacketConn, net.Listener, error) {
-	pc, err := net.ListenPacket("udp", addr)
-	if err != nil {
-		return nil, nil, fmt.Errorf("dns: %w", err)
-	}
-	ln, err := net.Listen("tcp", pc.LocalAddr().String())
-	if err != nil {
+	_, port, _ := net.SplitHostPort(addr)
+	var err error
+	for attempt := 0; attempt < 10; attempt++ {
+		var pc net.PacketConn
+		pc, err = net.ListenPacket("udp", addr)
+		if err != nil {
+			return nil, nil, fmt.Errorf("dns: %w", err)
+		}
+		var ln net.Listener
+		ln, err = net.Listen("tcp", pc.LocalAddr().String())
+		if err == nil {
+			return pc, ln, nil
+		}
 		pc.Close()
-		return nil, nil, fmt.Errorf("dns: %w", err)
+		if port != "0" {
+			break
+		}
 	}
-	return pc, ln, nil
+	return nil, nil, fmt.Errorf("dns: %w", err)
 }
 
 // Serve answers queries on pc and ln until ctx is cancelled.
