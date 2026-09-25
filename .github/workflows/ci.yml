@@ -42,26 +42,38 @@ jobs:
           Set-Content -Path config.yaml -Encoding ascii -Value "panel: {listen: 127.0.0.1:17708}`nrules: []"
           $p = Start-Process -FilePath .\tp.exe -ArgumentList 'run','-c','config.yaml','--state-dir','st' -PassThru -RedirectStandardError run.log -RedirectStandardOutput out.log
           $state = $null
-          for ($i = 0; $i -lt 60; $i++) {
+          $out = ''
+          for ($i = 0; $i -lt 45; $i++) {
             Start-Sleep -Seconds 2
             if (Test-Path st\tailproxy.json) {
               $js = Get-Content st\tailproxy.json -Raw | ConvertFrom-Json
               if ($js.local_api) {
-                $out = & .\tpctl.exe --state-dir st ts status --json 2>&1 | Out-String
+                # stdout only: the CLI may print warnings on stderr.
+                $out = & .\tpctl.exe --state-dir st ts status --json 2> tpctl.err | Out-String
                 try { $state = ($out | ConvertFrom-Json).BackendState } catch { $state = $null }
                 if ($state) { break }
               }
             }
           }
-          Get-Content run.log -Tail 20
-          if (-not $state) { Stop-Process -Id $p.Id -Force; throw "tpctl ts status --json never returned a BackendState" }
+          # The foreground banner prints the panel token; keep it out of the log.
+          Get-Content run.log -Tail 20 | Select-String -NotMatch 'token' | ForEach-Object { $_.Line }
+          if (-not $state) {
+            Write-Host "state file:"; Get-Content st\tailproxy.json -ErrorAction SilentlyContinue | Select-String -NotMatch 'token'
+            Write-Host "tpctl stdout:"; Write-Host $out
+            Write-Host "tpctl stderr:"; Get-Content tpctl.err -ErrorAction SilentlyContinue
+            Stop-Process -Id $p.Id -Force
+            throw "tpctl ts status --json never returned a BackendState"
+          }
           Write-Host "local_api: $($js.local_api)  BackendState: $state"
           & .\tpctl.exe --state-dir st ts version
+          if ($LASTEXITCODE -ne 0) { throw "tpctl ts version failed" }
           & .\tpctl.exe --state-dir st ts status
           & .\tpctl.exe --state-dir st status
           if ($LASTEXITCODE -ne 0) { throw "tpctl status failed" }
           & .\tpctl.exe --state-dir st ts down
           if ($LASTEXITCODE -eq 0) { throw "ts down ran without --yes" }
+          # Expected failure above; the pwsh wrapper would exit with it.
+          $global:LASTEXITCODE = 0
           Stop-Process -Id $p.Id -Force
 
   macos:
