@@ -13,11 +13,11 @@
 | Web 面板 + REST API + `/metrics`（`internal/panel`，端口 7708） | 已实现 |
 | 命令行 start / stop / status / token、systemd 开机自启 | 已实现 |
 | 出口管理器（`internal/egress`）：每个出口一个内嵌 tsnet 节点、固定出口节点、经出口的 DoH 解析、故障转移 / 延迟优选组与健康检查 | 已实现；出口节点出口已在真实 tailnet 上验证（见下文），出口组尚未在真实环境验证 |
-| SOCKS5 入口（`internal/proxy`，仅 CONNECT、仅回环地址）+ 连接追踪 | 已实现 |
+| SOCKS5 入口（`internal/proxy`，CONNECT + UDP ASSOCIATE、仅回环地址）+ 连接追踪 | 已实现；UDP ASSOCIATE 有单元测试，并用 PySocks 1.7.1 客户端互通测试过 |
 | 中继出口（`tailproxy relay` + `internal/relay`）：客户端只用一台 tailnet 设备就能有多个出口 | 已实现；已在真实 tailnet（中国 + 美国 VPS）上端到端验证 |
 | Linux 透明捕获（`capture.mode: tproxy`）：nftables TPROXY + 策略路由、FakeIP / 分流 DNS、SNI / HTTP Host 嗅探、DNS 劫持、防回环 | 已实现；在网络命名空间里做了端到端集成测试，**尚未在真实路由器 / OpenWrt 上验证** |
 | `tpctl` 本机命令行：管理 tailproxy + 内置官方 tailscale 客户端（操作主节点）+ schema | 已实现；Linux / macOS 走 Unix 套接字，Windows 走命名管道（由 CI 在真实 Windows 上验证） |
-| UDP 代理（Linux 透明捕获，`capture.udp: proxy`）：按规则经出口节点 / 直连转发 UDP（如 QUIC） | 已实现；网络命名空间集成测试覆盖，**尚未在真实路由器和出口节点上验证**；中继出口不承载 UDP；SOCKS5 UDP ASSOCIATE 未实现 |
+| UDP 代理（Linux 透明捕获，`capture.udp: proxy`）：按规则经出口节点 / 直连转发 UDP（如 QUIC） | 已实现；网络命名空间集成测试覆盖，**尚未在真实路由器和出口节点上验证**；中继出口不承载 UDP |
 | TUN 模式（`capture.mode: tun`）：TUN 设备 + gVisor 用户态协议栈，路由 + 协议栈内 DNS | Linux / macOS（utun）/ Windows（Wintun）已实现，三个平台都在 GitHub Actions 上用真实 TUN 设备跑通集成测试（DNS→FakeIP、TCP、UDP 到出口）；运行时自动把系统 DNS 指向协议栈内 DNS、退出时恢复（`capture.tun_system_dns`，CI 中三个平台都用系统解析器验证过）；Windows 需要 `wintun.dll`；只支持 selective 范围；Android / iOS 未实现；尚未在真实桌面上长期使用 |
 
 ## 启动与管理
@@ -152,7 +152,10 @@ curl --socks5-hostname 127.0.0.1:1080 https://example.com/
 - 按规则分流：`direct` 用本机网络直连；`reject` 拒绝（SOCKS 回复 0x02）；`tailnet` 通过任意已连接的槽位访问 tailnet 内部；出口名或出口组经对应的出口节点连接。
 - **不回落**：命中某个出口的连接，如果该出口没有就绪（未登录、找不到出口节点、出口节点离线），会直接失败，**不会**改走本地网络。
 - **DNS 不经本地**：发往出口的域名，通过该出口访问 `dns.per_egress_doh`（默认 `https://1.1.1.1/dns-query`）解析，所以解析结果与出口所在地一致，查询也不经过本地网络。这个地址必须写 IP，不能写域名。
-- SOCKS5 入口没有认证，所以只允许监听回环地址。目前只支持 TCP CONNECT，不支持 UDP ASSOCIATE。
+- SOCKS5 入口没有认证，所以只允许监听回环地址。支持 TCP CONNECT 和 UDP ASSOCIATE（RFC 1928 §7）：
+  - UDP 中继端口开在与 SOCKS 监听相同的回环地址上，只接受发起关联的 TCP 连接所在 IP 的数据报，第一个数据报的源端口确定后只认这个端口；TCP 控制连接关闭时关联和它的所有 UDP 流一起结束。
+  - 每个目的地址是一条 UDP 流，和 CONNECT 一样按规则选出口（直连或出口节点；中继出口不承载 UDP，这类流量被丢弃），空闲 5 分钟结束；面板和 `tpctl conns` 里显示为 `socks5`、`/udp`。
+  - 不支持分片（FRAG 不为 0 的数据报按 RFC 要求丢弃）；BIND 命令不支持。
 - IP 规则只匹配客户端直接给出的 IP 地址。客户端给的是域名时（例如 `--socks5-hostname`），只匹配域名规则。
 - 槽位登录后，「出口」页会列出 tailnet 中所有已批准的出口节点：名称、IP、系统、是否在线、被哪个槽位使用。把名称填进 `exit_node` 即可。
 - 某个出口所在地访问 `1.1.1.1` 不稳定时，可以给这个槽位单独设置 `doh:`（必须是 `https://<IP>/...`），覆盖全局的 `dns.per_egress_doh`。

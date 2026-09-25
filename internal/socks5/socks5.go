@@ -1,6 +1,7 @@
 // Package socks5 implements the parts of SOCKS5 (RFC 1928) tailproxy uses:
 // CONNECT, with either no authentication or username/password (RFC 1929),
-// on both the server and the client side.
+// on both the server and the client side, and on the server side UDP
+// ASSOCIATE (§7, without fragmentation).
 package socks5
 
 import (
@@ -10,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"slices"
 )
 
 const (
@@ -20,7 +22,8 @@ const (
 	MethodUserPass = 0x02
 	methodNone     = 0xFF
 
-	cmdConnect = 1
+	CmdConnect      = 1
+	CmdUDPAssociate = 3
 
 	atypIPv4   = 1
 	atypDomain = 3
@@ -51,16 +54,31 @@ func (c *Credentials) match(user, pass string) bool {
 		subtle.ConstantTimeCompare([]byte(pass), []byte(c.Password)) == 1
 }
 
+// Request is a client's request after the method negotiation.
+type Request struct {
+	Cmd  byte
+	Host string // IP literal or domain; may be empty for UDP ASSOCIATE
+	Port uint16
+}
+
 // ServerHandshake negotiates the method (no-auth, or username/password when
 // creds is set), reads a CONNECT request and returns its destination.
 // Unsupported requests get an error reply before an error is returned.
 func ServerHandshake(rw io.ReadWriter, creds *Credentials) (host string, port uint16, err error) {
+	req, err := ServerRequest(rw, creds, CmdConnect)
+	return req.Host, req.Port, err
+}
+
+// ServerRequest is ServerHandshake for any of the commands in cmds. For UDP
+// ASSOCIATE the address is where the client will send from, often
+// 0.0.0.0:0 (unknown).
+func ServerRequest(rw io.ReadWriter, creds *Credentials, cmds ...byte) (req Request, err error) {
 	var hdr [2]byte
 	if _, err = io.ReadFull(rw, hdr[:]); err != nil {
 		return
 	}
 	if hdr[0] != version {
-		return "", 0, fmt.Errorf("not SOCKS5 (version %d)", hdr[0])
+		return req, fmt.Errorf("not SOCKS5 (version %d)", hdr[0])
 	}
 	methods := make([]byte, hdr[1])
 	if _, err = io.ReadFull(rw, methods); err != nil {
@@ -76,7 +94,7 @@ func ServerHandshake(rw io.ReadWriter, creds *Credentials) (host string, port ui
 	}
 	if !offered {
 		rw.Write([]byte{version, methodNone})
-		return "", 0, fmt.Errorf("client does not offer method %d", want)
+		return req, fmt.Errorf("client does not offer method %d", want)
 	}
 	if _, err = rw.Write([]byte{version, want}); err != nil {
 		return
@@ -87,14 +105,15 @@ func ServerHandshake(rw io.ReadWriter, creds *Credentials) (host string, port ui
 		}
 	}
 
-	var req [4]byte
-	if _, err = io.ReadFull(rw, req[:]); err != nil {
+	var h [4]byte
+	if _, err = io.ReadFull(rw, h[:]); err != nil {
 		return
 	}
-	if req[0] != version {
-		return "", 0, fmt.Errorf("bad request version %d", req[0])
+	if h[0] != version {
+		return req, fmt.Errorf("bad request version %d", h[0])
 	}
-	if host, err = readAddr(rw, req[3]); err != nil {
+	req.Cmd = h[1]
+	if req.Host, err = readAddr(rw, h[3]); err != nil {
 		if errors.Is(err, errAtyp) {
 			WriteReply(rw, RepAtypNotSupported, netip.AddrPort{})
 		}
@@ -104,16 +123,16 @@ func ServerHandshake(rw io.ReadWriter, creds *Credentials) (host string, port ui
 	if _, err = io.ReadFull(rw, p[:]); err != nil {
 		return
 	}
-	port = binary.BigEndian.Uint16(p[:])
-	if req[1] != cmdConnect {
+	req.Port = binary.BigEndian.Uint16(p[:])
+	if !slices.Contains(cmds, req.Cmd) {
 		WriteReply(rw, RepCmdNotSupported, netip.AddrPort{})
-		return "", 0, fmt.Errorf("command %d not supported (only CONNECT)", req[1])
+		return req, fmt.Errorf("command %d not supported", req.Cmd)
 	}
-	if host == "" {
+	if req.Cmd == CmdConnect && req.Host == "" {
 		WriteReply(rw, RepGeneralFailure, netip.AddrPort{})
-		return "", 0, errors.New("empty host")
+		return req, errors.New("empty host")
 	}
-	return host, port, nil
+	return req, nil
 }
 
 func serverAuth(rw io.ReadWriter, creds *Credentials) error {
@@ -260,7 +279,7 @@ func ClientConnect(rw io.ReadWriter, creds *Credentials, host string, port uint1
 	if err := ClientAuth(rw, creds); err != nil {
 		return err
 	}
-	b := []byte{version, cmdConnect, 0}
+	b := []byte{version, CmdConnect, 0}
 	if ip, err := netip.ParseAddr(host); err == nil {
 		ip = ip.Unmap()
 		if ip.Is4() {

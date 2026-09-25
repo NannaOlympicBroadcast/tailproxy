@@ -148,14 +148,14 @@ func TestSOCKSProtocolErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	// no-auth, then UDP ASSOCIATE (3) to 0.0.0.0:0
+	// no-auth, then BIND (2) to 0.0.0.0:0
 	c.Write([]byte{5, 1, 0})
 	reply := make([]byte, 2)
 	io.ReadFull(c, reply)
-	c.Write([]byte{5, 3, 0, 1, 0, 0, 0, 0, 0, 0})
+	c.Write([]byte{5, 2, 0, 1, 0, 0, 0, 0, 0, 0})
 	rep := make([]byte, 10)
 	if _, err := io.ReadFull(c, rep); err != nil || rep[1] != socks5.RepCmdNotSupported {
-		t.Fatalf("UDP ASSOCIATE reply %v, %v", rep, err)
+		t.Fatalf("BIND reply %v, %v", rep, err)
 	}
 
 	c2, _ := net.Dial("tcp", addr)

@@ -12,8 +12,9 @@ import (
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/socks5"
 )
 
-// SOCKS5 (RFC 1928) inbound: no authentication, CONNECT only. It must listen
-// on a loopback address, since anyone who can reach it can use the egresses.
+// SOCKS5 (RFC 1928) inbound: no authentication, CONNECT and UDP ASSOCIATE
+// (socks5_udp.go). It must listen on a loopback address, since anyone who
+// can reach it can use the egresses.
 
 // SOCKS is a SOCKS5 inbound.
 type SOCKS struct {
@@ -69,12 +70,16 @@ func (s *SOCKS) logf(format string, args ...any) {
 
 func (s *SOCKS) handle(ctx context.Context, client net.Conn) {
 	client.SetDeadline(time.Now().Add(15 * time.Second))
-	host, port, err := socks5.ServerHandshake(client, nil)
+	req, err := socks5.ServerRequest(client, nil, socks5.CmdConnect, socks5.CmdUDPAssociate)
 	if err != nil {
 		client.Close()
 		return
 	}
-	target, c, err := s.Router.Connect(ctx, "socks5", client.RemoteAddr().String(), host, port)
+	if req.Cmd == socks5.CmdUDPAssociate {
+		s.udpAssociate(ctx, client, req)
+		return
+	}
+	target, c, err := s.Router.Connect(ctx, "socks5", client.RemoteAddr().String(), req.Host, req.Port)
 	if err != nil {
 		socks5.WriteReply(client, replyCode(err), netip.AddrPort{})
 		client.Close()
