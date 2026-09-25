@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -211,18 +212,30 @@ func TestParseUpstreams(t *testing.T) {
 	old := resolvConfPaths
 	defer func() { resolvConfPaths = old }()
 
+	// resolv.conf parsing (what "system" means except on Windows, which
+	// reads the adapters: sysresolv_windows.go).
 	resolvConfPaths = []string{filepath.Join(dir, "missing"), stub}
-	if _, err := ParseUpstreams("system"); err == nil {
-		t.Fatal("loopback-only system resolver accepted")
+	if got := resolvConfResolvers(nil); len(got) != 0 {
+		t.Fatalf("loopback-only system resolver accepted: %v", got)
 	}
 	resolvConfPaths = []string{real, stub}
-	if got, err := ParseUpstreams("system"); err != nil || len(got) != 2 || got[0] != "10.0.0.2:53" || got[1] != "[fe80::1%eth0]:53" {
-		t.Fatalf("system: %v %v", got, err)
+	if got := resolvConfResolvers(nil); len(got) != 2 || got[0] != "10.0.0.2:53" || got[1] != "[fe80::1%eth0]:53" {
+		t.Fatalf("resolv.conf: %v", got)
+	}
+	if runtime.GOOS != "windows" {
+		if got, err := ParseUpstreams("system"); err != nil || len(got) != 2 {
+			t.Fatalf("system: %v %v", got, err)
+		}
+		resolvConfPaths = []string{stub}
+		if _, err := ParseUpstreams("system"); err == nil {
+			t.Fatal("system with only a loopback resolver accepted")
+		}
+		resolvConfPaths = []string{real, stub}
 	}
 	// TUN mode's DNS address (system DNS points there) is never an upstream.
 	os.WriteFile(real, []byte("nameserver 172.19.0.2\nnameserver 10.0.0.2\n"), 0o644)
-	if got, err := ParseUpstreams("system", netip.MustParseAddr("172.19.0.2")); err != nil || len(got) != 1 || got[0] != "10.0.0.2:53" {
-		t.Fatalf("system without the TUN DNS: %v %v", got, err)
+	if got := resolvConfResolvers([]netip.Addr{netip.MustParseAddr("172.19.0.2")}); len(got) != 1 || got[0] != "10.0.0.2:53" {
+		t.Fatalf("resolv.conf without the TUN DNS: %v", got)
 	}
 }
 
