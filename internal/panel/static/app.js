@@ -544,7 +544,7 @@ function connRow(c, active) {
   const dst = el("td");
   dst.append(el("div", `${c.host}:${c.port}`));
   const SRC = { fakeip: "FakeIP", tls: "SNI", http: "HTTP Host", socks: "SOCKS", learned: "学习的 DNS 应答" };
-  const meta = [c.inbound, c.source];
+  const meta = [c.network === "udp" ? c.inbound + " UDP" : c.inbound, c.source];
   if (c.domain_source && c.domain_source !== "socks") meta.push("域名来自 " + (SRC[c.domain_source] || c.domain_source));
   if (c.dest_ip) meta.push("目的 IP " + c.dest_ip);
   if (c.ech) meta.push(c.outer_sni ? "ECH，外层 SNI " + c.outer_sni : "ECH");

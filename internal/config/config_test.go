@@ -86,6 +86,9 @@ func TestLoadMissingFile(t *testing.T) {
 }
 
 func TestCaptureConfig(t *testing.T) {
+	if _, err := Parse([]byte("capture: {mode: tproxy, udp: proxy}\nrules: []\n")); err != nil {
+		t.Fatalf("udp: proxy: %v", err)
+	}
 	c, err := Parse([]byte("capture: {mode: tproxy}\negress: [{name: us, exit_node: a}]\nrules: []\n"))
 	if err != nil {
 		t.Fatal(err)
@@ -97,6 +100,7 @@ func TestCaptureConfig(t *testing.T) {
 		"capture: {mode: tun}\nrules: []\n",
 		"capture: {mode: magic}\nrules: []\n",
 		"capture: {mode: tproxy, scope: some}\nrules: []\n",
+		"capture: {mode: tproxy, udp: always}\nrules: []\n",
 		"capture: {exclude_cidr: [not-a-cidr]}\nrules: []\n",
 		"dns: {mode: dnssec}\nrules: []\n",
 		"dns: {fakeip: {inet4: 'fc00::/18'}}\nrules: []\n",

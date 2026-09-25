@@ -117,7 +117,7 @@ func (s *Slot) makeDoH(url string) *DoH {
 			if err != nil {
 				return nil, fmt.Errorf("DoH URL must use an IP address, got %s", addr)
 			}
-			return s.dialIP(ctx, ap)
+			return s.dialIP(ctx, "tcp", ap)
 		},
 		ForceAttemptHTTP2: true,
 		// A pooled connection through an exit node can die silently
@@ -411,6 +411,16 @@ func (s *Slot) needsLogin() bool {
 // resolved with DoH through the same exit node, so no DNS query leaves via
 // the local network.
 func (s *Slot) Dial(ctx context.Context, host string, port uint16) (net.Conn, error) {
+	return s.dial(ctx, "tcp", host, port)
+}
+
+// DialUDP is Dial for UDP: the returned Conn is connected to host:port and
+// its packets travel through the exit node (tsnet's netstack).
+func (s *Slot) DialUDP(ctx context.Context, host string, port uint16) (net.Conn, error) {
+	return s.dial(ctx, "udp", host, port)
+}
+
+func (s *Slot) dial(ctx context.Context, network, host string, port uint16) (net.Conn, error) {
 	if !s.Ready() {
 		st := s.Status()
 		return nil, fmt.Errorf("%w: %s is %s %s", ErrNotReady, s.name, st.State, st.Detail)
@@ -428,7 +438,7 @@ func (s *Slot) Dial(ctx context.Context, host string, port uint16) (net.Conn, er
 	}
 	var errs []error
 	for _, a := range addrs {
-		c, err := s.dialIP(ctx, netip.AddrPortFrom(a, port))
+		c, err := s.dialIP(ctx, network, netip.AddrPortFrom(a, port))
 		if err == nil {
 			return c, nil
 		}
@@ -437,25 +447,25 @@ func (s *Slot) Dial(ctx context.Context, host string, port uint16) (net.Conn, er
 	return nil, errors.Join(errs...)
 }
 
-func (s *Slot) dialIP(ctx context.Context, ap netip.AddrPort) (net.Conn, error) {
+func (s *Slot) dialIP(ctx context.Context, network string, ap netip.AddrPort) (net.Conn, error) {
 	srv := s.server()
 	if srv == nil {
 		return nil, fmt.Errorf("%w: %s is stopped", ErrNotReady, s.name)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	return srv.Dial(ctx, "tcp", ap.String())
+	return srv.Dial(ctx, network, ap.String())
 }
 
 // dialTailnet dials a tailnet address; MagicDNS names are resolved by tsnet.
-func (s *Slot) dialTailnet(ctx context.Context, host string, port uint16) (net.Conn, error) {
+func (s *Slot) dialTailnet(ctx context.Context, network, host string, port uint16) (net.Conn, error) {
 	srv := s.server()
 	if srv == nil {
 		return nil, fmt.Errorf("%w: %s is stopped", ErrNotReady, s.name)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	return srv.Dial(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(int(port))))
+	return srv.Dial(ctx, network, net.JoinHostPort(host, strconv.Itoa(int(port))))
 }
 
 // status of the node as reported by tsnet, for peer listing.

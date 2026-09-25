@@ -5,6 +5,7 @@ package capture
 import (
 	"errors"
 	"net"
+	"net/netip"
 	"syscall"
 )
 
@@ -24,3 +25,23 @@ func Setup(o Options) error { return errUnsupported }
 
 // Teardown is a no-op outside Linux.
 func Teardown() error { return nil }
+
+// UDPListener is Linux-only.
+type UDPListener struct{}
+
+// ListenTProxyUDP is Linux-only.
+func ListenTProxyUDP(port uint16) ([]*UDPListener, error) { return nil, errUnsupported }
+
+// ReadFrom is Linux-only.
+func (l *UDPListener) ReadFrom(b []byte) (int, netip.AddrPort, netip.AddrPort, error) {
+	return 0, netip.AddrPort{}, netip.AddrPort{}, errUnsupported
+}
+
+// Close is Linux-only.
+func (l *UDPListener) Close() error { return nil }
+
+// LocalAddr is Linux-only.
+func (l *UDPListener) LocalAddr() net.Addr { return nil }
+
+// DialUDPReply is Linux-only.
+func DialUDPReply(orig, client netip.AddrPort) (*net.UDPConn, error) { return nil, errUnsupported }

@@ -16,6 +16,7 @@ type Conn struct {
 	ID        uint64
 	Started   time.Time
 	Inbound   string
+	Network   string // "udp" for UDP flows; "" is TCP
 	Source    string
 	Host      string // domain if known, else the destination IP
 	Port      uint16
@@ -41,6 +42,7 @@ type ConnView struct {
 	Started   time.Time  `json:"started"`
 	Ended     *time.Time `json:"ended,omitempty"`
 	Inbound   string     `json:"inbound"`
+	Network   string     `json:"network,omitempty"`
 	Source    string     `json:"source"`
 	Host      string     `json:"host"`
 	Port      uint16     `json:"port"`
@@ -103,7 +105,7 @@ func (c *Conn) view() ConnView {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	v := ConnView{
-		ID: c.ID, Started: c.Started, Inbound: c.Inbound, Source: c.Source, Host: c.Host, Port: c.Port,
+		ID: c.ID, Started: c.Started, Inbound: c.Inbound, Network: c.Network, Source: c.Source, Host: c.Host, Port: c.Port,
 		DestIP: c.DestIP, DomainSrc: c.DomainSrc, ECH: c.ECH, OuterSNI: c.OuterSNI,
 		RuleIndex: c.RuleIndex, Reason: c.Reason, Target: c.Target, Via: c.Via,
 		Up: c.up.Load(), Down: c.down.Load(), Error: c.err,

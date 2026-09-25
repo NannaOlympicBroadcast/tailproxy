@@ -57,6 +57,7 @@ func TestTProxyIntegration(t *testing.T) {
 	}
 	netnsTest(t)
 	netnsLearnTest(t)
+	netnsUDPTest(t)
 }
 
 // setupLoopback returns whether IPv6 routing could be set up too.
@@ -159,6 +160,20 @@ func (e *testEgress) Dial(ctx context.Context, target, host string, port uint16)
 	// Stand-in for an exit: every name is served by the local origin.
 	d := net.Dialer{Control: capture.BypassControl}
 	c, err := d.DialContext(ctx, "tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)))
+	return c, target, err
+}
+
+// DialUDP stands in for UDP through an exit: every name is served by the
+// local UDP origin. Target "relay" fails like a relay egress does.
+func (e *testEgress) DialUDP(ctx context.Context, target, host string, port uint16) (net.Conn, string, error) {
+	e.mu.Lock()
+	e.seen = append(e.seen, "udp "+target+" "+host)
+	e.mu.Unlock()
+	if target == "relay" {
+		return nil, "", errors.New("relay egress does not carry UDP")
+	}
+	d := net.Dialer{Control: capture.BypassControl}
+	c, err := d.DialContext(ctx, "udp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)))
 	return c, target, err
 }
 
@@ -547,5 +562,172 @@ func netnsLearnTest(t *testing.T) {
 	}
 	if tracker.Snapshot().Bypass.Learned != 1 {
 		t.Fatalf("learned counter: %+v", tracker.Snapshot().Bypass)
+	}
+}
+
+// netnsUDPTest runs capture.udp: proxy. UDP to a FakeIP or a routed prefix
+// goes through the egress, and replies come back from the address the
+// client sent to; DNS to a routed address still reaches the DNS front end.
+func netnsUDPTest(t *testing.T) {
+	var logMu sync.Mutex
+	logDone := false
+	logf := func(format string, args ...any) {
+		logMu.Lock()
+		defer logMu.Unlock()
+		if !logDone {
+			t.Logf(format, args...)
+		}
+	}
+	defer func() {
+		logMu.Lock()
+		logDone = true
+		logMu.Unlock()
+	}()
+	upstream := upstreamDNS(t)
+
+	// Origin: a UDP echo server on loopback.
+	origin, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer origin.Close()
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, from, err := origin.ReadFromUDPAddrPort(buf)
+			if err != nil {
+				return
+			}
+			origin.WriteToUDPAddrPort(append([]byte("echo:"), buf[:n]...), from)
+		}
+	}()
+	port := origin.LocalAddr().(*net.UDPAddr).Port
+
+	engine, err := rule.Compile([]config.Rule{
+		{DomainSuffix: []string{"egress.test"}, Egress: "vps"},
+		{DomainSuffix: []string{"relay.test"}, Egress: "relay"},
+		{IPCIDR: []string{"203.0.113.0/24"}, Egress: "vps"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules := func() *rule.Engine { return engine }
+	pool, _ := fakeip.New(fakeip.DefaultInet4, fakeip.DefaultInet6)
+	bypass := net.Dialer{Control: capture.BypassControl}
+	eg := &testEgress{}
+	tracker := proxy.NewTracker()
+	router := &proxy.Router{Rules: rules, Egress: eg, Tracker: tracker,
+		Direct: net.Dialer{Control: capture.BypassControl, Resolver: dnsserver.Resolver([]string{upstream}, &bypass)}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dns := &dnsserver.Server{Pool: pool, Rules: rules, Upstreams: []string{upstream}, Dialer: bypass, Logf: logf}
+	pc, dln, err := dnsserver.Listen("127.0.0.1:11055")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go dns.Serve(ctx, pc, dln)
+
+	const tport = 17895
+	lns, err := capture.ListenTProxy(tport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		for _, ln := range lns {
+			ln.Close()
+		}
+	}()
+	ulns, err := capture.ListenTProxyUDP(tport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := &proxy.TransparentUDP{Router: router, Pool: pool, Logf: logf, Timeout: time.Minute,
+		Reply: func(orig, client netip.AddrPort) (net.Conn, error) { return capture.DialUDPReply(orig, client) }}
+	for _, ln := range ulns {
+		go in.Serve(ctx, ln)
+	}
+	opts := capture.Options{Scope: capture.ScopeSelective, TProxyPort: tport, DNSPort: 11055, UDP: true,
+		FakeIP: pool.Prefixes(), Route: append(pool.Prefixes(), netip.MustParsePrefix("203.0.113.0/24"))}
+	if err := capture.Setup(opts); err != nil {
+		t.Fatal(err)
+	}
+	defer capture.Teardown()
+
+	// DNS to an address inside a routed prefix is still DNS, not a UDP flow.
+	sysResolver := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, "203.0.113.53:53")
+	}}
+	lookup := func(name string) netip.Addr {
+		t.Helper()
+		lctx, lcancel := context.WithTimeout(ctx, 5*time.Second)
+		defer lcancel()
+		addrs, err := sysResolver.LookupNetIP(lctx, "ip4", name)
+		if err != nil || len(addrs) != 1 || !pool.Contains(addrs[0]) {
+			t.Fatalf("lookup %s: %v %v", name, addrs, err)
+		}
+		return addrs[0]
+	}
+	exchange := func(dst netip.AddrPort, msgs ...string) error {
+		t.Helper()
+		c, err := net.DialUDP("udp", nil, net.UDPAddrFromAddrPort(dst))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		buf := make([]byte, 2048)
+		for _, m := range msgs {
+			c.Write([]byte(m))
+			c.SetReadDeadline(time.Now().Add(2 * time.Second))
+			n, err := c.Read(buf) // a connected socket only accepts replies from dst
+			if err != nil {
+				return err
+			}
+			if got := string(buf[:n]); got != "echo:"+m {
+				t.Fatalf("%s: got %q, want %q", dst, got, "echo:"+m)
+			}
+		}
+		return nil
+	}
+
+	fake := lookup("quic.egress.test")
+	if dns.Queries.Load() == 0 {
+		t.Fatal("DNS to a routed address did not reach the DNS front end")
+	}
+	// Two packets on one flow: later packets may arrive on the listener or
+	// on the flow's connected reply socket; both must reach the egress.
+	if err := exchange(netip.AddrPortFrom(fake, uint16(port)), "one", "two"); err != nil {
+		t.Fatalf("UDP via FakeIP: %v", err)
+	}
+	if err := exchange(netip.AddrPortFrom(netip.MustParseAddr("203.0.113.7"), uint16(port)), "cidr"); err != nil {
+		t.Fatalf("UDP via ip_cidr: %v", err)
+	}
+	relay := lookup("x.relay.test")
+	if err := exchange(netip.AddrPortFrom(relay, uint16(port)), "r"); err == nil {
+		t.Fatal("UDP to a relay egress got a reply")
+	}
+
+	eg.mu.Lock()
+	seen := strings.Join(eg.seen, ", ")
+	eg.mu.Unlock()
+	for _, want := range []string{"udp vps quic.egress.test", "udp vps 203.0.113.7", "udp relay x.relay.test"} {
+		if !strings.Contains(seen, want) {
+			t.Errorf("egress calls %q: missing %q", seen, want)
+		}
+	}
+	snap := tracker.Snapshot()
+	var flows int
+	for _, v := range append(snap.Active, snap.Recent...) {
+		t.Logf("udp flow: %s %s:%d src=%s -> %s up=%d down=%d err=%q", v.Network, v.Host, v.Port, v.DomainSrc, v.Target, v.Up, v.Down, v.Error)
+		if v.Network == "udp" {
+			flows++
+		}
+		if v.Host == "quic.egress.test" && (v.Up != 6 || v.Down != 16) {
+			t.Errorf("byte counts: %+v", v)
+		}
+	}
+	if flows != 3 {
+		t.Errorf("udp flows recorded: %d, want 3", flows)
 	}
 }

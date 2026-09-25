@@ -27,6 +27,10 @@ func (f *fakeEgress) Dial(_ context.Context, target, host string, port uint16) (
 	return nil, "", errors.New("fake egress")
 }
 
+func (f *fakeEgress) DialUDP(ctx context.Context, target, host string, port uint16) (net.Conn, string, error) {
+	return f.Dial(ctx, "udp "+target, host, port)
+}
+
 func (f *fakeEgress) DialTailnet(ctx context.Context, host string, port uint16) (net.Conn, string, error) {
 	return f.Dial(ctx, config.TargetTailnet, host, port)
 }

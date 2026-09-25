@@ -100,7 +100,11 @@ func Setup(o Options) error {
 	if err := routing(true); err != nil {
 		return err
 	}
-	if err := fakeUDPUnreachable(o.FakeIP); err != nil {
+	unreachable := o.FakeIP
+	if o.UDP {
+		unreachable = nil // UDP to FakeIPs is proxied
+	}
+	if err := fakeUDPUnreachable(unreachable); err != nil {
 		return err
 	}
 	return runNft(script)

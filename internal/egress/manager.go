@@ -373,6 +373,20 @@ func (m *Manager) Close() error {
 // Dial connects to host:port through the egress named target (a slot, a
 // relay or a group) and returns the exit that carried the connection.
 func (m *Manager) Dial(ctx context.Context, target, host string, port uint16) (net.Conn, string, error) {
+	return m.dial(ctx, "tcp", target, host, port)
+}
+
+// DialUDP is Dial for UDP. Relays do not carry UDP (ErrUDPUnsupported); a
+// group uses the member it would pick for TCP. target "tailnet" dials a
+// tailnet address, like DialTailnet.
+func (m *Manager) DialUDP(ctx context.Context, target, host string, port uint16) (net.Conn, string, error) {
+	if target == config.TargetTailnet {
+		return m.dialTailnet(ctx, "udp", host, port)
+	}
+	return m.dial(ctx, "udp", target, host, port)
+}
+
+func (m *Manager) dial(ctx context.Context, network, target, host string, port uint16) (net.Conn, string, error) {
 	m.mu.RLock()
 	s, isSlot := m.slots[target]
 	r, isRelay := m.relays[target]
@@ -392,19 +406,29 @@ func (m *Manager) Dial(ctx context.Context, target, host string, port uint16) (n
 	default:
 		return nil, "", fmt.Errorf("unknown egress %q", target)
 	}
-	c, err := x.Dial(ctx, host, port)
+	var c net.Conn
+	var err error
+	if network == "udp" {
+		c, err = x.DialUDP(ctx, host, port)
+	} else {
+		c, err = x.Dial(ctx, host, port)
+	}
 	return c, x.Name(), err
 }
 
 // DialTailnet connects to a tailnet address (100.x IP or MagicDNS name) via
 // the main node, or any connected slot; tailnet traffic skips exit nodes.
 func (m *Manager) DialTailnet(ctx context.Context, host string, port uint16) (net.Conn, string, error) {
+	return m.dialTailnet(ctx, "tcp", host, port)
+}
+
+func (m *Manager) dialTailnet(ctx context.Context, network, host string, port uint16) (net.Conn, string, error) {
 	m.mu.RLock()
 	nodes := append([]*Slot{m.main}, m.slotList()...)
 	m.mu.RUnlock()
 	for _, s := range nodes {
 		if s.tailnetUp() {
-			c, err := s.dialTailnet(ctx, host, port)
+			c, err := s.dialTailnet(ctx, network, host, port)
 			via := s.name
 			if s.main {
 				via = "main"

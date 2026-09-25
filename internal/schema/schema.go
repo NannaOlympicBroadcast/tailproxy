@@ -58,6 +58,7 @@ var fields = map[string]meta{
 	"capture":                        {desc: "流量入口"},
 	"capture.mode":                   {desc: "auto / socks：只开 SOCKS5；tproxy：Linux 透明捕获（需 root）；tun：未实现", enum: []string{"auto", "socks", "tproxy", "tun"}, def: "auto"},
 	"capture.scope":                  {desc: "tproxy 捕获范围：selective 只接管 FakeIP 与规则 ip_cidr；all 接管全部 TCP", enum: []string{"selective", "all"}, def: "selective"},
+	"capture.udp":                    {desc: "tproxy 的 UDP：block 让发往 FakeIP 的 UDP 立即不可达，应用改用 TCP；proxy 按规则代理 UDP（如 QUIC），中继出口不能承载 UDP，这类流量会被丢弃", enum: []string{"block", "proxy"}, def: "block"},
 	"capture.exclude_cidr":           {desc: "永不捕获的网段"},
 	"capture.socks_listen":           {desc: "SOCKS5 入口（只能是回环地址），如 127.0.0.1:1080"},
 	"capture.tproxy_port":            {desc: "TPROXY 端口", def: 7893},

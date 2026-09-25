@@ -37,7 +37,10 @@ type captureRuntime struct {
 	dnsLn     net.Listener
 	tproxyLns []net.Listener
 	in        *proxy.Transparent
-	rules     func() *rule.Engine
+	// UDP inbound (capture.udp: proxy); nil otherwise.
+	udpLns []*capture.UDPListener
+	udpIn  *proxy.TransparentUDP
+	rules  func() *rule.Engine
 	// DoH block lists (nil when dns.anti_bypass.block_doh is off).
 	doh      *antibypass.Lists
 	dohFile  string
@@ -139,6 +142,16 @@ func setupCapture(cfg *config.Config, rules func() *rule.Engine, router *proxy.R
 	if c.learn != nil {
 		c.in.Learned = c.learn.Lookup
 	}
+	if cfg.Capture.UDP == config.UDPProxy {
+		if c.udpLns, err = capture.ListenTProxyUDP(cfg.Capture.TProxyPort); err != nil {
+			return nil, err
+		}
+		c.udpIn = &proxy.TransparentUDP{Router: router, Pool: c.pool, Logf: log.Printf,
+			Reply: func(orig, client netip.AddrPort) (net.Conn, error) { return capture.DialUDPReply(orig, client) }}
+		if c.learn != nil {
+			c.udpIn.Learned = c.learn.Lookup
+		}
+	}
 
 	var exclude []netip.Prefix
 	for _, s := range cfg.Capture.ExcludeCIDR {
@@ -150,6 +163,7 @@ func setupCapture(cfg *config.Config, rules func() *rule.Engine, router *proxy.R
 		DNSPort: dnsAddr.Port(), HijackLANDNS: !dnsAddr.Addr().IsLoopback(),
 		FakeIP: fakePrefixes, Exclude: exclude,
 		BlockDoTDoQ: ab.BlockDoTDoQOn(),
+		UDP:         c.udpIn != nil,
 	}
 	capture.Teardown() // leftovers from a crash
 	if err := c.apply(); err != nil {
@@ -233,6 +247,13 @@ func (c *captureRuntime) Serve(ctx context.Context) {
 			}
 		}()
 	}
+	for _, ln := range c.udpLns {
+		go func() {
+			if err := c.udpIn.Serve(ctx, ln); err != nil {
+				log.Printf("tailproxy: tproxy udp: %v", err)
+			}
+		}()
+	}
 	if c.doh != nil {
 		go c.refreshDoH(ctx)
 	}
@@ -298,6 +319,9 @@ func (c *captureRuntime) Close() {
 	for _, ln := range c.tproxyLns {
 		ln.Close()
 	}
+	for _, ln := range c.udpLns {
+		ln.Close()
+	}
 	if c.dnsPC != nil {
 		c.dnsPC.Close()
 		c.dnsLn.Close()
@@ -312,6 +336,11 @@ func (c *captureRuntime) Close() {
 // Summary for the panel's component list.
 func (c *captureRuntime) Summary() (capState, capDetail, dnsState, dnsDetail string) {
 	capDetail = fmt.Sprintf("TPROXY :%d，范围 %s", c.opts.TProxyPort, c.opts.Scope)
+	if c.udpIn != nil {
+		capDetail += fmt.Sprintf("；UDP 代理，活动流 %d", c.udpIn.Flows())
+	} else {
+		capDetail += "；UDP：发往 FakeIP 的立即不可达"
+	}
 	d := c.dns
 	mode := "real"
 	if c.pool != nil {

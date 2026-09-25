@@ -167,7 +167,17 @@ type Capture struct {
 	SocksListen string   `yaml:"socks_listen" json:"socks_listen"`
 	TProxyPort  uint16   `yaml:"tproxy_port" json:"tproxy_port"`
 	DNSListen   string   `yaml:"dns_listen" json:"dns_listen"`
+	// UDP for tproxy: "block" (default: UDP to FakeIPs is unreachable, so
+	// clients fall back to TCP) or "proxy" (UDP is routed like TCP;
+	// relay egresses cannot carry it).
+	UDP string `yaml:"udp,omitempty" json:"udp,omitempty"`
 }
+
+// UDP modes (capture.udp).
+const (
+	UDPBlock = "block"
+	UDPProxy = "proxy"
+)
 
 type Panel struct {
 	Listen       string `yaml:"listen" json:"listen"`
@@ -388,6 +398,11 @@ func (c *Config) validateCapture(egressNames map[string]bool) []error {
 	case "", "selective", "all":
 	default:
 		errs = append(errs, fmt.Errorf("capture.scope %q: want selective or all", c.Capture.Scope))
+	}
+	switch c.Capture.UDP {
+	case "", UDPBlock, UDPProxy:
+	default:
+		errs = append(errs, fmt.Errorf("capture.udp %q: want block or proxy", c.Capture.UDP))
 	}
 	for _, p := range c.Capture.ExcludeCIDR {
 		if _, err := ParsePrefix(p); err != nil {

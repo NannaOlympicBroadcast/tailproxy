@@ -35,6 +35,7 @@ type member interface {
 	Name() string
 	Ready() bool
 	Dial(ctx context.Context, host string, port uint16) (net.Conn, error)
+	DialUDP(ctx context.Context, host string, port uint16) (net.Conn, error)
 	Status() Status
 	checkHealth(ctx context.Context, url string)
 	healthOK() (ok bool, rtt float64, measured bool)
@@ -332,6 +333,15 @@ func (r *Relay) Ready() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.status.State == StateReady
+}
+
+// ErrUDPUnsupported is returned for UDP through a relay: the relay protocol
+// carries TCP only, and UDP never falls back to the local network.
+var ErrUDPUnsupported = errors.New("relay egress does not carry UDP")
+
+// DialUDP always fails: relays carry TCP only.
+func (r *Relay) DialUDP(context.Context, string, uint16) (net.Conn, error) {
+	return nil, fmt.Errorf("%w (%s)", ErrUDPUnsupported, r.name)
 }
 
 // Dial asks the relay to connect to host:port. Names are sent unresolved, so

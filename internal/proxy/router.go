@@ -23,6 +23,9 @@ var ErrRejected = errors.New("rejected by rule")
 type Egress interface {
 	Dial(ctx context.Context, target, host string, port uint16) (net.Conn, string, error)
 	DialTailnet(ctx context.Context, host string, port uint16) (net.Conn, string, error)
+	// DialUDP returns a Conn connected to host:port whose packets go
+	// through target (an egress name, or "tailnet").
+	DialUDP(ctx context.Context, target, host string, port uint16) (net.Conn, string, error)
 }
 
 // Router picks a target for each connection and dials it.
@@ -73,6 +76,17 @@ func (r *Router) Connect(ctx context.Context, inbound, source, host string, port
 // ConnectDest is Connect for a destination that may have both a domain and
 // an address. Domain rules see the domain; IP rules see the real address.
 func (r *Router) ConnectDest(ctx context.Context, inbound, source string, d Dest) (net.Conn, *Conn, error) {
+	return r.connect(ctx, "tcp", inbound, source, d)
+}
+
+// ConnectUDP is ConnectDest for a UDP flow: the rules decide the same way,
+// and the returned Conn is a connected UDP socket (one packet per Read and
+// Write). The caller relays packets and finishes c.
+func (r *Router) ConnectUDP(ctx context.Context, inbound, source string, d Dest) (net.Conn, *Conn, error) {
+	return r.connect(ctx, "udp", inbound, source, d)
+}
+
+func (r *Router) connect(ctx context.Context, network, inbound, source string, d Dest) (net.Conn, *Conn, error) {
 	q := rule.Query{Domain: d.Domain, IP: d.IP, Port: d.Port, OuterSNI: d.OuterSNI}
 	res := r.Rules().Match(q)
 	// An explicit outer_sni match is the user's answer for an unknown
@@ -91,6 +105,9 @@ func (r *Router) ConnectDest(ctx context.Context, inbound, source string, d Dest
 	}
 	c := &Conn{Inbound: inbound, Source: source, Host: host, Port: d.Port, DomainSrc: d.DomainSrc, ECH: d.ECH, OuterSNI: d.OuterSNI,
 		RuleIndex: res.RuleIndex, Reason: res.Reason, Target: res.Target}
+	if network == "udp" {
+		c.Network = "udp"
+	}
 	if d.IP.IsValid() && d.Domain != "" {
 		c.DestIP = d.IP.String()
 	}
@@ -109,14 +126,16 @@ func (r *Router) ConnectDest(ctx context.Context, inbound, source string, d Dest
 		out net.Conn
 		err error
 	)
-	switch res.Target {
-	case config.TargetReject:
+	switch {
+	case res.Target == config.TargetReject:
 		err = ErrRejected
-	case config.TargetDirect:
+	case res.Target == config.TargetDirect:
 		dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		out, err = r.Direct.DialContext(dctx, "tcp", net.JoinHostPort(dialHost, strconv.Itoa(int(port))))
+		out, err = r.Direct.DialContext(dctx, network, net.JoinHostPort(dialHost, strconv.Itoa(int(port))))
 		cancel()
-	case config.TargetTailnet:
+	case network == "udp":
+		out, c.Via, err = r.Egress.DialUDP(ctx, res.Target, dialHost, port)
+	case res.Target == config.TargetTailnet:
 		out, c.Via, err = r.Egress.DialTailnet(ctx, dialHost, port)
 	default:
 		out, c.Via, err = r.Egress.Dial(ctx, res.Target, dialHost, port)

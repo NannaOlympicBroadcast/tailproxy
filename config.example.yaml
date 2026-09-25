@@ -41,6 +41,7 @@ capture:
   exclude_cidr: [100.64.0.0/10, fd7a:115c:a1e0::/48, 192.168.0.0/16]
   socks_listen: 127.0.0.1:1080      # 可选，默认关闭
   tproxy_port: 7893                 # 仅 Linux TPROXY
+  udp: block                        # tproxy 的 UDP：block（默认，发往 FakeIP 的 UDP 立即不可达）| proxy（按规则代理，如 QUIC）
   dns_listen: 127.0.0.1:1053        # 仅路由器 / TPROXY 模式
 
 panel:

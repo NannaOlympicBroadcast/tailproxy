@@ -54,6 +54,9 @@ func (f *fakePanel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&req)
 		f.tokens[strings.Split(r.URL.Path, "/")[4]] = req.Token
 		io.WriteString(w, `{"ok":true}`)
+	case r.Method == "GET" && r.URL.Path == "/api/v1/connections":
+		io.WriteString(w, `{"active":[{"host":"quic.example","port":443,"network":"udp","inbound":"tproxy","target":"us","up":1,"down":2}],
+			"recent":[],"total":1,"failed":0,"bypass":{"transparent":5,"fakeip":1,"sniffed":1,"learned":1,"unknown":2,"ech":1,"doh_blocked":3}}`)
 	case r.Method == "POST" && r.URL.Path == "/api/v1/rules/test":
 		f.lastTest = nil
 		json.NewDecoder(r.Body).Decode(&f.lastTest)
@@ -199,6 +202,34 @@ func TestLookupAndSchema(t *testing.T) {
 	for _, what := range []string{"config", "api", "commands"} {
 		if err := cmdSchema(globals{}, []string{what}); err != nil {
 			t.Fatal(err)
+		}
+	}
+}
+
+// withStdout captures what fn prints.
+func withStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, _ := os.Pipe()
+	old := os.Stdout
+	os.Stdout = w
+	done := make(chan string)
+	go func() { b, _ := io.ReadAll(r); done <- string(b) }()
+	fn()
+	os.Stdout = old
+	w.Close()
+	return <-done
+}
+
+func TestConns(t *testing.T) {
+	_, dir := setup(t)
+	out := withStdout(t, func() {
+		if err := run("tpctl", []string{"--state-dir", dir, "conns"}); err != nil {
+			t.Error(err)
+		}
+	})
+	for _, want := range []string{"quic.example:443/udp", "未知 2", "ECH 1", "拦截 DoH 3"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
 		}
 	}
 }

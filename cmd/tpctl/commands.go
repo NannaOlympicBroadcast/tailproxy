@@ -616,6 +616,7 @@ func cmdConns(g globals, args []string) error {
 		type conn struct {
 			Host      string `json:"host"`
 			Port      int    `json:"port"`
+			Network   string `json:"network"`
 			Inbound   string `json:"inbound"`
 			DomainSrc string `json:"domain_source"`
 			Target    string `json:"target"`
@@ -630,7 +631,13 @@ func cmdConns(g globals, args []string) error {
 			Total  int    `json:"total"`
 			Failed int    `json:"failed"`
 			Bypass struct {
-				Transparent, FakeIP, Sniffed, Learned, Unknown, ECH, DoHBlocked int64
+				Transparent int64 `json:"transparent"`
+				FakeIP      int64 `json:"fakeip"`
+				Sniffed     int64 `json:"sniffed"`
+				Learned     int64 `json:"learned"`
+				Unknown     int64 `json:"unknown"`
+				ECH         int64 `json:"ech"`
+				DoHBlocked  int64 `json:"doh_blocked"`
 			} `json:"bypass"`
 		}
 		if err := json.Unmarshal(raw, &s); err != nil {
@@ -646,7 +653,11 @@ func cmdConns(g globals, args []string) error {
 		}
 		rows := [][]string{{"目的地", "入口", "目标", "经由", "上行", "下行", "错误"}}
 		for _, x := range list {
-			rows = append(rows, []string{fmt.Sprintf("%s:%d", x.Host, x.Port), x.Inbound, x.Target, x.Via, strconv.FormatInt(x.Up, 10), strconv.FormatInt(x.Down, 10), x.Error})
+			dst := fmt.Sprintf("%s:%d", x.Host, x.Port)
+			if x.Network == "udp" {
+				dst += "/udp"
+			}
+			rows = append(rows, []string{dst, x.Inbound, x.Target, x.Via, strconv.FormatInt(x.Up, 10), strconv.FormatInt(x.Down, 10), x.Error})
 		}
 		fmt.Println()
 		table(rows)

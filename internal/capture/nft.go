@@ -51,9 +51,12 @@ type Options struct {
 	HijackLANDNS bool
 	// Route are always captured: FakeIP pools and routed ip_cidr prefixes.
 	Route []netip.Prefix
-	// FakeIP pools; UDP to them is made unreachable by policy routing so
-	// clients fall back to TCP quickly (only TCP is proxied).
+	// FakeIP pools. Unless UDP is set, UDP to them is made unreachable by
+	// policy routing so clients fall back to TCP quickly.
 	FakeIP []netip.Prefix
+	// UDP diverts UDP (except DNS) to the TPROXY port too, with the same
+	// scope as TCP.
+	UDP bool
 	// Exclude are never captured and win over Route (capture.exclude_cidr).
 	Exclude []netip.Prefix
 	// DoHAddrs are public DoH resolvers: TCP/UDP 443 to them is refused
@@ -121,13 +124,37 @@ func Ruleset(o Options) (string, error) {
 	set(&b, "route6", "ipv6_addr", rt6)
 	set(&b, "local4", "ipv4_addr", def4)
 	set(&b, "local6", "ipv6_addr", def6)
+	var d4, d6 []string
+	for _, a := range o.DoHAddrs {
+		if a.Is4() {
+			d4 = append(d4, a.String())
+		} else {
+			d6 = append(d6, a.String())
+		}
+	}
+	set(&b, "doh4", "ipv4_addr", d4)
+	set(&b, "doh6", "ipv6_addr", d6)
+
+	protos, notDNS := "tcp", ""
+	if o.UDP {
+		protos, notDNS = "{ tcp, udp }", "\n\t\tudp dport 53 return"
+	}
+	// Forwarded traffic that the block chains refuse (DoH / DoT / DoQ) must
+	// not be diverted: TPROXY would deliver it locally and proxy it.
+	skipBlocked := ""
+	if len(o.DoHAddrs) > 0 {
+		skipBlocked += "\n\t\tip daddr @doh4 th dport 443 return\n\t\tip6 daddr @doh6 th dport 443 return"
+	}
+	if o.BlockDoTDoQ {
+		skipBlocked += "\n\t\tth dport 853 return"
+	}
 
 	// Forwarded (LAN) traffic and locally generated traffic rerouted to lo.
 	fmt.Fprintf(&b, `
 	chain prerouting {
 		type filter hook prerouting priority mangle; policy accept;
-		meta l4proto != tcp return
-		fib daddr type local return
+		meta l4proto != %s return%s
+		fib daddr type local return%s
 		meta l4proto tcp socket transparent 1 meta mark set %#x accept
 		meta mark & %#x == %#x goto divert
 		jump decide_pre
@@ -142,13 +169,13 @@ func Ruleset(o Options) (string, error) {
 	}
 
 	chain divert {
-		meta nfproto ipv4 meta l4proto tcp tproxy ip to 127.0.0.1:%d meta mark set %#x accept
-		meta nfproto ipv6 meta l4proto tcp tproxy ip6 to [::1]:%d meta mark set %#x accept
+		meta nfproto ipv4 meta l4proto %s tproxy ip to 127.0.0.1:%d meta mark set %#x accept
+		meta nfproto ipv6 meta l4proto %s tproxy ip6 to [::1]:%d meta mark set %#x accept
 	}
 
 	chain output {
 		type route hook output priority mangle; policy accept;
-		meta l4proto != tcp return
+		meta l4proto != %s return%s
 		meta mark & %#x == %#x return
 		fib daddr type local return
 		jump mark_out
@@ -162,25 +189,17 @@ func Ruleset(o Options) (string, error) {
 %s		return
 	}
 `,
+		protos, notDNS, skipBlocked,
 		RouteMark,
 		RouteMark, RouteMark,
 		allScope(o.Scope, "goto divert"),
-		o.TProxyPort, RouteMark, o.TProxyPort, RouteMark,
+		protos, o.TProxyPort, RouteMark, protos, o.TProxyPort, RouteMark,
+		protos, notDNS,
 		BypassMask, BypassMark,
 		RouteMark, RouteMark,
 		allScope(o.Scope, fmt.Sprintf("meta mark set %#x return", RouteMark)))
 
 	if len(o.DoHAddrs) > 0 || o.BlockDoTDoQ {
-		var d4, d6 []string
-		for _, a := range o.DoHAddrs {
-			if a.Is4() {
-				d4 = append(d4, a.String())
-			} else {
-				d6 = append(d6, a.String())
-			}
-		}
-		set(&b, "doh4", "ipv4_addr", d4)
-		set(&b, "doh6", "ipv6_addr", d6)
 		for _, hook := range []string{"output", "forward"} {
 			fmt.Fprintf(&b, "\n\tchain block_%s {\n\t\ttype filter hook %s priority filter; policy accept;\n", hook, hook)
 			fmt.Fprintf(&b, "\t\tmeta mark & %#x == %#x return\n", BypassMask, BypassMark)
