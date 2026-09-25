@@ -45,7 +45,7 @@ var fields = map[string]meta{
 	"dns.fakeip.inet4":               {desc: "IPv4 地址池", def: "198.18.0.0/15"},
 	"dns.fakeip.inet6":               {desc: "IPv6 地址池", def: "fc00::/18"},
 	"dns.per_egress_doh":             {desc: "出口内解析域名用的 DoH（https://<IP>/...）", def: "https://1.1.1.1/dns-query", format: "uri"},
-	"dns.direct_upstream":            {desc: "直连 / 转发用的上游：system，或逗号分隔的 IP[:port]", def: "system"},
+	"dns.direct_upstream":            {desc: "直连 / 转发用的上游：system（Linux/macOS 读 resolv.conf，Windows 读网卡 DNS），或逗号分隔的 IP[:port]", def: "system"},
 	"dns.anti_bypass":                {desc: "DoH / ECH 旁路对策（DESIGN §4.8）"},
 	"dns.anti_bypass.canary":         {desc: "use-application-dns.net 返回 NXDOMAIN（默认开）", def: true},
 	"dns.anti_bypass.block_doh":      {desc: "封堵公开 DoH 端点：域名 NXDOMAIN、SNI 拒绝、IP 的 443 端口 RST（默认开）", def: true},

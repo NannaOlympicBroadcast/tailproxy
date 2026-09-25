@@ -305,7 +305,7 @@ dns:
   - macOS：用 `networksetup -setdnsservers` 修改每个网络服务的 DNS（与 wg-quick 的做法相同），原设置保存在 `/var/db/tailproxy/dns-backup.json`；崩溃后下次启动或 `sudo tailproxy capture down` 会恢复。
   - Windows：给 Wintun 网卡设置 DNS 并把接口跃点数设为 0（与 wireguard-windows 相同），并清空 DNS 缓存；网卡删除时设置随之消失。CI 中设置后约 8 秒系统解析器才开始使用它，之前的查询仍走原来的 DNS。
   - 设置失败时只打印警告，面板的捕获组件会显示状态；也可以设 `off` 手动配置，例如 Linux `resolvectl dns tailproxy0 172.19.0.2; resolvectl domain tailproxy0 '~.'`，macOS `networksetup -setdnsservers Wi-Fi 172.19.0.2`（恢复：`... Wi-Fi empty`），Windows `Set-DnsClientServerAddress -InterfaceAlias <物理网卡> -ServerAddresses 172.19.0.2`（恢复：`-ResetServerAddresses`）。
-  - `dns.direct_upstream: system` 会跳过 `172.19.0.2`，避免 tailproxy 把查询转发给自己；Windows 上没有 `/etc/resolv.conf`，需要显式填写上游，例如 `direct_upstream: "223.5.5.5, 119.29.29.29"`。
+  - `dns.direct_upstream: system` 会跳过 `172.19.0.2`，避免 tailproxy 把查询转发给自己；Windows 上 `system` 读取已启用网卡的 DNS 设置（跳过回环、链路本地和 `fec0::` 占位地址）。
   - 也可以另设 `capture.dns_listen` 让 DNS 同时监听主机地址。
 - DoH 封堵只有域名部分生效（DNS 和 SNI），按 IP 封堵依赖 nftables，只在 tproxy 模式下有。
 - 停止时设备和路由随之删除；`tailproxy capture down` 也会清理残留的策略规则。

@@ -415,7 +415,7 @@ func ParseUpstreams(spec string, exclude ...netip.Addr) ([]string, error) {
 	if spec == "" || spec == "system" {
 		ups := systemResolvers(exclude)
 		if len(ups) == 0 {
-			return nil, errors.New("dns.direct_upstream: system: no non-loopback resolver found in /run/systemd/resolve/resolv.conf or /etc/resolv.conf; set it explicitly, e.g. \"223.5.5.5, 119.29.29.29\"")
+			return nil, fmt.Errorf("dns.direct_upstream: system: no non-loopback resolver found in %s; set it explicitly, e.g. \"223.5.5.5, 119.29.29.29\"", systemResolverSource)
 		}
 		return ups, nil
 	}
@@ -441,7 +441,15 @@ func ParseUpstreams(spec string, exclude ...netip.Addr) ([]string, error) {
 // file names the real upstreams behind the 127.0.0.53 stub.
 var resolvConfPaths = []string{"/run/systemd/resolve/resolv.conf", "/etc/resolv.conf"}
 
-func systemResolvers(exclude []netip.Addr) []string {
+// usableResolver rejects loopback resolvers (a local stub, see
+// ParseUpstreams), unspecified addresses and the excluded ones.
+func usableResolver(ip netip.Addr, exclude []netip.Addr) bool {
+	return !ip.IsLoopback() && !ip.IsUnspecified() && !slices.Contains(exclude, ip)
+}
+
+// resolvConfResolvers reads the nameservers of the first resolv.conf in
+// resolvConfPaths that names a usable one.
+func resolvConfResolvers(exclude []netip.Addr) []string {
 	for _, p := range resolvConfPaths {
 		data, err := os.ReadFile(p)
 		if err != nil {
@@ -454,7 +462,7 @@ func systemResolvers(exclude []netip.Addr) []string {
 				continue
 			}
 			ip, err := netip.ParseAddr(f[1]) // keeps a zone (fe80::1%eth0)
-			if err != nil || ip.IsLoopback() || ip.IsUnspecified() || slices.Contains(exclude, ip) {
+			if err != nil || !usableResolver(ip, exclude) {
 				continue
 			}
 			out = append(out, netip.AddrPortFrom(ip, 53).String())
