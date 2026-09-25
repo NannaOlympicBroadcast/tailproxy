@@ -35,7 +35,7 @@ func (r *runtimeView) Components() []panel.Component {
 		out = append(out, panel.Component{Name: "transparent_capture", State: cs, Detail: cd}, panel.Component{Name: "dns", State: ds, Detail: dd})
 	} else {
 		out = append(out,
-			panel.Component{Name: "transparent_capture", State: "disabled", Detail: "未开启（capture.mode: tproxy 开启 Linux 透明捕获；TUN 尚未实现）"},
+			panel.Component{Name: "transparent_capture", State: "disabled", Detail: "未开启（capture.mode: tproxy 为 Linux nftables 透明捕获；capture.mode: tun 为 TUN 设备，需 root / 管理员）"},
 			panel.Component{Name: "dns", State: "disabled", Detail: "随透明捕获开启；出口内的域名通过该出口做 DoH 解析"},
 		)
 	}

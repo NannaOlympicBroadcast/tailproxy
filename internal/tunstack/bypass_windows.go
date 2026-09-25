@@ -19,6 +19,9 @@ const ipUnicastIf = 31
 // (IP_UNICAST_IF), as Tailscale binds its own sockets. Use it for direct
 // dials and upstream DNS.
 func BypassControl(network, address string, c syscall.RawConn) error {
+	if isLoopback(address) {
+		return nil // binding to the physical interface would make loopback unreachable
+	}
 	dr, err := netmon.DefaultRoute()
 	if err != nil || dr.InterfaceIndex == 0 {
 		return nil

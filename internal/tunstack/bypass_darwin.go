@@ -16,6 +16,9 @@ import (
 // (IP_BOUND_IF), as Tailscale binds its own sockets. Use it for direct
 // dials and upstream DNS.
 func BypassControl(network, address string, c syscall.RawConn) error {
+	if isLoopback(address) {
+		return nil // binding to the physical interface would make loopback unreachable
+	}
 	idx, err := netmon.DefaultRouteInterfaceIndex()
 	if err != nil || idx == 0 {
 		return nil // no default route: nothing to bind to

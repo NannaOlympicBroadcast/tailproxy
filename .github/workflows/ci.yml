@@ -91,7 +91,8 @@ jobs:
           go test -c -o tunstack.test.exe ./internal/tunstack/
           Copy-Item wintun\wintun\bin\amd64\wintun.dll .
           $env:TP_TUN_INTEGRATION = "1"
-          .\tunstack.test.exe -test.run TestTUNIntegration -test.v
+          # Quoted: PowerShell splits unquoted -test.run into -test and .run.
+          .\tunstack.test.exe '-test.run=TestTUNIntegration' '-test.v'
           if ($LASTEXITCODE -ne 0) { throw "TUN integration failed" }
 
   macos:

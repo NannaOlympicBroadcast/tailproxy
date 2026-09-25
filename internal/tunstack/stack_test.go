@@ -310,3 +310,14 @@ func TestStackRejectUDP(t *testing.T) {
 		t.Fatalf("DNS with RejectUDP: %v", err)
 	}
 }
+
+func TestIsLoopback(t *testing.T) {
+	for addr, want := range map[string]bool{
+		"127.0.0.1:80": true, "[::1]:443": true, "[::ffff:127.0.0.1]:1": true,
+		"198.18.0.1:443": false, "example.com:80": false, "": false,
+	} {
+		if got := isLoopback(addr); got != want {
+			t.Errorf("isLoopback(%q) = %v", addr, got)
+		}
+	}
+}
