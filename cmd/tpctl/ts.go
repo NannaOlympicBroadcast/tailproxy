@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -22,19 +21,21 @@ var riskyTS = map[string]string{
 
 // runTS runs the official tailscale CLI against tailproxy's main node.
 func runTS(g globals, args []string) error {
-	if runtime.GOOS == "windows" {
-		return errors.New("tpctl ts 在 Windows 上暂不支持（tailproxy 的 LocalAPI 套接字只在 Linux / macOS 上提供）")
+	if len(args) > 0 {
+		if warn, ok := riskyTS[args[0]]; ok && !g.yes && !isHelp(args) {
+			return fmt.Errorf("tpctl ts %s %s；确认要执行请加 --yes：tpctl --yes ts %s", args[0], warn, strings.Join(args, " "))
+		}
 	}
 	sock := g.paths.LocalAPI
 	if st, err := g.paths.Running(); err == nil && st != nil && st.LocalAPI != "" {
 		sock = st.LocalAPI
+	} else if runtime.GOOS == "windows" {
+		// The pipe name is random and only recorded in the state file.
+		return fmt.Errorf("找不到 tailproxy 主节点的 LocalAPI 命名管道：tailproxy 没有运行，或状态目录不对（%s）", g.paths.Dir)
 	}
-	if _, err := os.Stat(sock); err != nil {
-		return fmt.Errorf("找不到 tailproxy 主节点的 LocalAPI 套接字 %s：tailproxy 没有运行，或不是以当前用户运行（%v）", sock, err)
-	}
-	if len(args) > 0 {
-		if warn, ok := riskyTS[args[0]]; ok && !g.yes && !isHelp(args) {
-			return fmt.Errorf("tpctl ts %s %s；确认要执行请加 --yes：tpctl --yes ts %s", args[0], warn, strings.Join(args, " "))
+	if !strings.HasPrefix(sock, `\\.\pipe\`) {
+		if _, err := os.Stat(sock); err != nil {
+			return fmt.Errorf("找不到 tailproxy 主节点的 LocalAPI 套接字 %s：tailproxy 没有运行，或不是以当前用户运行（%v）", sock, err)
 		}
 	}
 	return tscli.Run(append([]string{"--socket=" + sock}, args...))

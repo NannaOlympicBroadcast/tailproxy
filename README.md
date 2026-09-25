@@ -16,7 +16,7 @@
 | SOCKS5 入口（`internal/proxy`，仅 CONNECT、仅回环地址）+ 连接追踪 | 已实现 |
 | 中继出口（`tailproxy relay` + `internal/relay`）：客户端只用一台 tailnet 设备就能有多个出口 | 已实现；已在真实 tailnet（中国 + 美国 VPS）上端到端验证 |
 | Linux 透明捕获（`capture.mode: tproxy`）：nftables TPROXY + 策略路由、FakeIP / 分流 DNS、SNI / HTTP Host 嗅探、DNS 劫持、防回环 | 已实现；在网络命名空间里做了端到端集成测试，**尚未在真实路由器 / OpenWrt 上验证** |
-| `tpctl` 本机命令行：管理 tailproxy + 内置官方 tailscale 客户端（操作主节点）+ schema | 已实现（`tpctl ts` 暂不支持 Windows） |
+| `tpctl` 本机命令行：管理 tailproxy + 内置官方 tailscale 客户端（操作主节点）+ schema | 已实现；Linux / macOS 走 Unix 套接字，Windows 走命名管道（由 CI 在真实 Windows 上验证） |
 | TUN（Windows / macOS / Android / iOS）、UDP 代理 | 未实现 |
 
 ## 启动与管理
@@ -304,9 +304,11 @@ tailproxy 本身已经带着一个登录好的 Tailscale 节点（主节点）�
   ```
 
   也可以 `ln -s tpctl tailscale`，之后 `tailscale status` 就等同于 `tpctl ts status`。
-  - tailproxy 运行时，会在状态目录创建主节点的 LocalAPI 套接字 `tailscaled.sock`：目录权限 700，套接字权限 600，只有运行 tailproxy 的用户能用。路径超过 Unix 套接字长度上限时，改放在 `$TMPDIR/tailproxy-<uid>/`，实际路径记在 `tailproxy.json` 里。
+  - tailproxy 运行时，会把主节点的 LocalAPI 开放给本机：
+    - **Linux / macOS**：状态目录里的 Unix 套接字 `tailscaled.sock`，目录权限 700，套接字权限 600，只有运行 tailproxy 的用户能用。路径超过 Unix 套接字长度上限时，改放在 `$TMPDIR/tailproxy-<uid>/`。
+    - **Windows**：随机命名的命名管道 `\\.\pipe\tailproxy-<随机>`，DACL 只允许当前用户和 SYSTEM，并且不继承上级权限。Tailscale 自己的管道允许所有用户连接，再逐个连接检查令牌；tailproxy 不做这种检查，所以直接在管道上限制。同名管道已存在时监听会失败（`FILE_CREATE`），不会被抢注的管道冒充。
+    - 实际路径记在 `tailproxy.json` 里，tpctl 从那里读取。
   - `down` / `logout` / `up` / `set` / `switch` 会影响主节点，中继和设备列表都依赖它，所以需要加 `--yes` 确认（通过 `tailscale` 软链接调用时不需要，和官方客户端一致）。
-  - 暂不支持 Windows：官方客户端在 Windows 上走命名管道，需要单独处理权限。
 
 - **schema**：给脚本和 AI 代理用的机器可读描述，不需要 tailproxy 在运行：
 

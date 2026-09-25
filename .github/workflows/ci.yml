@@ -1,0 +1,92 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test -race ./...
+      - name: TPROXY integration (network namespace, real nftables)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq nftables
+          go test -c -o capture.test ./internal/capture/
+          sudo ./capture.test -test.run TestTProxyIntegration -test.v
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./...
+      - name: tpctl ts over the LocalAPI named pipe (end to end)
+        shell: pwsh
+        run: |
+          go build -o tp.exe ./cmd/tailproxy
+          go build -o tpctl.exe ./cmd/tpctl
+          Set-Content -Path config.yaml -Encoding ascii -Value "panel: {listen: 127.0.0.1:17708}`nrules: []"
+          $p = Start-Process -FilePath .\tp.exe -ArgumentList 'run','-c','config.yaml','--state-dir','st' -PassThru -RedirectStandardError run.log -RedirectStandardOutput out.log
+          $state = $null
+          for ($i = 0; $i -lt 60; $i++) {
+            Start-Sleep -Seconds 2
+            if (Test-Path st\tailproxy.json) {
+              $js = Get-Content st\tailproxy.json -Raw | ConvertFrom-Json
+              if ($js.local_api) {
+                $out = & .\tpctl.exe --state-dir st ts status --json 2>&1 | Out-String
+                try { $state = ($out | ConvertFrom-Json).BackendState } catch { $state = $null }
+                if ($state) { break }
+              }
+            }
+          }
+          Get-Content run.log -Tail 20
+          if (-not $state) { Stop-Process -Id $p.Id -Force; throw "tpctl ts status --json never returned a BackendState" }
+          Write-Host "local_api: $($js.local_api)  BackendState: $state"
+          & .\tpctl.exe --state-dir st ts version
+          & .\tpctl.exe --state-dir st ts status
+          & .\tpctl.exe --state-dir st status
+          if ($LASTEXITCODE -ne 0) { throw "tpctl status failed" }
+          & .\tpctl.exe --state-dir st ts down
+          if ($LASTEXITCODE -eq 0) { throw "ts down ran without --yes" }
+          Stop-Process -Id $p.Id -Force
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./...
+      - name: tpctl ts over the LocalAPI Unix socket (end to end)
+        run: |
+          go build -o tp ./cmd/tailproxy
+          go build -o tpctl ./cmd/tpctl
+          printf 'panel: {listen: 127.0.0.1:17708}\nrules: []\n' > config.yaml
+          ./tp start -c config.yaml --state-dir "$PWD/st"
+          for i in $(seq 1 30); do
+            state=$(./tpctl --state-dir "$PWD/st" ts status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["BackendState"])' 2>/dev/null) && [ -n "$state" ] && break
+            sleep 2
+          done
+          python3 -c "import json; print('local_api:', json.load(open('st/tailproxy.json')).get('local_api'))"
+          echo "BackendState: $state"
+          ls -l "$(python3 -c "import json; print(json.load(open('st/tailproxy.json'))['local_api'])")"
+          ./tpctl --state-dir "$PWD/st" ts version
+          ./tpctl --state-dir "$PWD/st" status
+          ./tp stop --state-dir "$PWD/st"
+          test -n "$state"
