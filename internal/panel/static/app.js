@@ -543,7 +543,7 @@ function connRow(c, active) {
   tr.append(el("td", new Date(c.started).toLocaleTimeString()));
   const dst = el("td");
   dst.append(el("div", `${c.host}:${c.port}`));
-  const SRC = { fakeip: "FakeIP", tls: "SNI", http: "HTTP Host", socks: "SOCKS" };
+  const SRC = { fakeip: "FakeIP", tls: "SNI", http: "HTTP Host", socks: "SOCKS", learned: "学习的 DNS 应答" };
   const meta = [c.inbound, c.source];
   if (c.domain_source && c.domain_source !== "socks") meta.push("域名来自 " + (SRC[c.domain_source] || c.domain_source));
   if (c.dest_ip) meta.push("目的 IP " + c.dest_ip);
@@ -576,7 +576,7 @@ async function loadConnections() {
   box.replaceChildren();
   if (b.transparent) {
     const pct = (n) => `${n}（${Math.round((100 * n) / b.transparent)}%）`;
-    box.append(el("p", `透明捕获 ${b.transparent} 条：域名来自 FakeIP ${pct(b.fakeip)}，来自 SNI / Host ${pct(b.sniffed)}，域名未知 ${pct(b.unknown)}；带 ECH ${b.ech}，拦截 DoH ${b.doh_blocked}`));
+    box.append(el("p", `透明捕获 ${b.transparent} 条：域名来自 FakeIP ${pct(b.fakeip)}，来自 SNI / Host ${pct(b.sniffed)}，来自学习的 DNS 应答 ${pct(b.learned || 0)}，域名未知 ${pct(b.unknown)}；带 ECH ${b.ech}，拦截 DoH ${b.doh_blocked}`));
     if (b.top_unknown && b.top_unknown.length) {
       box.append(el("p", "域名未知（只能按 IP 规则匹配）最多的目的地：" + b.top_unknown.slice(0, 8).map((x) => `${x.dest} ×${x.count}`).join("，"), "muted"));
     }

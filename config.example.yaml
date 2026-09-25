@@ -31,8 +31,8 @@ dns:
       - https://raw.githubusercontent.com/dibdot/DoH-IP-blocklists/master/doh-ipv6.txt
     doh_allow: []                   # 白名单
     block_dot_doq: true             # TCP/UDP 853（默认开）
-    strip_ech: auto                 # auto = 仅 real 模式开启
-    learn_rule_ips: true            # 规则域名预解析 + 应答学习
+    strip_ech: auto                 # auto = 仅 real 模式开启 | on | off
+    learn_rule_ips: true            # 规则域名预解析 + 应答学习（默认开）
   unknown_domain: ip_rules_only     # ip_rules_only | egress:<name> | reject
 
 capture:

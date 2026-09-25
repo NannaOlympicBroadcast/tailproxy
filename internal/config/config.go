@@ -111,7 +111,7 @@ type AntiBypass struct {
 	DoHAllow     []string `yaml:"doh_allow" json:"doh_allow"`
 	BlockDoTDoQ  *bool    `yaml:"block_dot_doq,omitempty" json:"block_dot_doq,omitempty"`
 	StripECH     string   `yaml:"strip_ech" json:"strip_ech"`
-	LearnRuleIPs bool     `yaml:"learn_rule_ips" json:"learn_rule_ips"`
+	LearnRuleIPs *bool    `yaml:"learn_rule_ips,omitempty" json:"learn_rule_ips,omitempty"`
 }
 
 func on(b *bool) bool { return b == nil || *b }
@@ -124,6 +124,23 @@ func (a AntiBypass) BlockDoHOn() bool { return on(a.BlockDoH) }
 
 // BlockDoTDoQOn: refuse TCP/UDP 853 (default on).
 func (a AntiBypass) BlockDoTDoQOn() bool { return on(a.BlockDoTDoQ) }
+
+// LearnOn: pre-resolve rule host names and learn addresses from DNS
+// answers (L4, default on).
+func (a AntiBypass) LearnOn() bool { return on(a.LearnRuleIPs) }
+
+// StripECHOn reports whether HTTPS/SVCB answers lose their ech parameter
+// (L3): "auto" (default) only in real-IP DNS mode, where the SNI is the
+// only way to see the name; "on" / "off" force it.
+func (a AntiBypass) StripECHOn(dnsMode string) bool {
+	switch a.StripECH {
+	case "on", "true":
+		return true
+	case "off", "false":
+		return false
+	}
+	return dnsMode == "real"
+}
 
 // DefaultDoHLists are the public DoH domain / IP lists (DESIGN S38).
 var DefaultDoHLists = []string{
@@ -394,6 +411,11 @@ func (c *Config) validateCapture(egressNames map[string]bool) []error {
 		case (name == "dns.fakeip.inet4") != p.Addr().Is4():
 			errs = append(errs, fmt.Errorf("%s: %s is the wrong address family", name, s))
 		}
+	}
+	switch c.DNS.AntiBypass.StripECH {
+	case "", "auto", "on", "off", "true", "false":
+	default:
+		errs = append(errs, fmt.Errorf("dns.anti_bypass.strip_ech %q: want auto, on or off", c.DNS.AntiBypass.StripECH))
 	}
 	switch u := c.DNS.UnknownDomain; {
 	case u == "", u == "ip_rules_only", u == "reject":

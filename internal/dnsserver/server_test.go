@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -39,10 +40,21 @@ func upstream(t *testing.T) (string, *atomic.Int64) {
 				continue
 			}
 			r := dnsmessage.Message{Header: dnsmessage.Header{ID: q.ID, Response: true}, Questions: q.Questions}
-			if q.Questions[0].Type == dnsmessage.TypeA {
+			switch q.Questions[0].Type {
+			case dnsmessage.TypeA:
 				r.Answers = []dnsmessage.Resource{{
 					Header: dnsmessage.ResourceHeader{Name: q.Questions[0].Name, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 300},
 					Body:   &dnsmessage.AResource{A: [4]byte{203, 0, 113, 9}},
+				}}
+			case typeHTTPS:
+				r.Answers = []dnsmessage.Resource{{
+					Header: dnsmessage.ResourceHeader{Name: q.Questions[0].Name, Type: typeHTTPS, Class: dnsmessage.ClassINET, TTL: 300},
+					Body: &dnsmessage.HTTPSResource{SVCBResource: dnsmessage.SVCBResource{Priority: 1, Target: dnsmessage.MustNewName("."),
+						Params: []dnsmessage.SVCParam{
+							{Key: dnsmessage.SVCParamALPN, Value: []byte{2, 'h', '2'}},
+							{Key: dnsmessage.SVCParamIPv4Hint, Value: []byte{203, 0, 113, 9}},
+							{Key: dnsmessage.SVCParamECH, Value: []byte{0, 3, 1, 2, 3}},
+						}}},
 				}}
 			}
 			b, _ := r.Pack()
@@ -206,5 +218,52 @@ func TestParseUpstreams(t *testing.T) {
 	resolvConfPaths = []string{real, stub}
 	if got, err := ParseUpstreams("system"); err != nil || len(got) != 2 || got[0] != "10.0.0.2:53" || got[1] != "[fe80::1%eth0]:53" {
 		t.Fatalf("system: %v %v", got, err)
+	}
+}
+
+func TestStripECHAndObserve(t *testing.T) {
+	up, _ := upstream(t)
+	s, _ := testServer(t, up)
+	s.Pool = nil // real mode
+	s.StripECH = true
+	var mu sync.Mutex
+	seen := map[string][]netip.Addr{}
+	s.Observe = func(name string, addrs []netip.Addr, ttl time.Duration) {
+		mu.Lock()
+		seen[name] = addrs
+		mu.Unlock()
+		if ttl != 300*time.Second {
+			t.Errorf("ttl %v", ttl)
+		}
+	}
+	addr := startServer(t, s)
+	m := query(t, "udp", addr, "chat.openai.com", typeHTTPS)
+	if len(m.Answers) != 1 {
+		t.Fatalf("answers: %+v", m.Answers)
+	}
+	h := m.Answers[0].Body.(*dnsmessage.HTTPSResource)
+	if _, ok := h.GetParam(dnsmessage.SVCParamECH); ok {
+		t.Fatal("ech not stripped")
+	}
+	if _, ok := h.GetParam(dnsmessage.SVCParamALPN); !ok {
+		t.Fatal("alpn lost")
+	}
+	if s.ECHStripped.Load() != 1 {
+		t.Fatalf("stripped %d", s.ECHStripped.Load())
+	}
+	query(t, "udp", addr, "Chat.OpenAI.com", dnsmessage.TypeA)
+	mu.Lock()
+	defer mu.Unlock()
+	if a := seen["chat.openai.com"]; len(a) != 1 || a[0].String() != "203.0.113.9" {
+		t.Fatalf("observed: %v", seen)
+	}
+
+	// Without StripECH the record passes through unchanged.
+	s2, _ := testServer(t, up)
+	s2.Pool = nil
+	addr2 := startServer(t, s2)
+	m = query(t, "udp", addr2, "x.example", typeHTTPS)
+	if _, ok := m.Answers[0].Body.(*dnsmessage.HTTPSResource).GetParam(dnsmessage.SVCParamECH); !ok {
+		t.Fatal("ech stripped without StripECH")
 	}
 }

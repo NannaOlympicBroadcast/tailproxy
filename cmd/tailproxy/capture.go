@@ -21,6 +21,7 @@ import (
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/config"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/dnsserver"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/fakeip"
+	"github.com/NannaOlympicBroadcast/tailproxy/internal/iplearn"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/proxy"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/rule"
 )
@@ -43,6 +44,12 @@ type captureRuntime struct {
 	dohURLs  []string
 	dohHTTP  *http.Client
 	dohDirty atomic.Bool // lists changed: re-apply nft
+	// learn maps real addresses back to names (nil when learn_rule_ips is
+	// off); resolver pre-resolves rule host names through the upstreams.
+	learn        *iplearn.Table
+	resolver     *net.Resolver
+	learnGen     uint64 // table generation in the applied nft rules
+	learnApplied time.Time
 
 	mu      sync.Mutex
 	applied []netip.Prefix // routed prefixes currently in nft
@@ -107,6 +114,16 @@ func setupCapture(cfg *config.Config, rules func() *rule.Engine, router *proxy.R
 		c.dohHTTP = &http.Client{Timeout: 90 * time.Second, Transport: &http.Transport{DialContext: direct.DialContext}}
 		c.dns.Block = c.doh.BlockedDomain
 	}
+	c.dns.StripECH = ab.StripECHOn(cfg.DNS.Mode)
+	if ab.LearnOn() {
+		c.learn = iplearn.New()
+		c.resolver = router.Direct.Resolver
+		c.dns.Observe = func(name string, addrs []netip.Addr, ttl time.Duration) {
+			if rules().DomainMayRoute(name) {
+				c.learn.Add(name, addrs, ttl)
+			}
+		}
+	}
 	if c.dnsPC, c.dnsLn, err = dnsserver.Listen(cfg.Capture.DNSListen); err != nil {
 		return nil, err
 	}
@@ -118,6 +135,9 @@ func setupCapture(cfg *config.Config, rules func() *rule.Engine, router *proxy.R
 	c.in = &proxy.Transparent{Router: router, Pool: c.pool, ListenPort: cfg.Capture.TProxyPort, Logf: log.Printf}
 	if c.doh != nil {
 		c.in.BlockDomain = c.doh.BlockedDomain
+	}
+	if c.learn != nil {
+		c.in.Learned = c.learn.Lookup
 	}
 
 	var exclude []netip.Prefix
@@ -147,13 +167,55 @@ func (c *captureRuntime) apply() error {
 		v4, v6 := c.doh.Addrs()
 		o.DoHAddrs = append(v4, v6...)
 	}
+	var gen uint64
+	if c.learn != nil {
+		// Learned addresses of routed names are captured too, so selective
+		// mode also works with real-IP DNS and with apps using their own DoH.
+		var addrs []netip.Addr
+		addrs, gen = c.learn.Addrs(c.rules().DomainMayRoute)
+		for _, a := range addrs {
+			o.Route = append(o.Route, netip.PrefixFrom(a, a.BitLen()))
+		}
+	}
 	if err := capture.Setup(o); err != nil {
 		return err
 	}
 	c.mu.Lock()
-	c.applied = routed
+	c.applied, c.learnGen, c.learnApplied = routed, gen, time.Now()
 	c.mu.Unlock()
 	return nil
+}
+
+// learnChanged reports new learned addresses, at most every 10 seconds (each
+// re-apply rewrites the whole table).
+func (c *captureRuntime) learnChanged() bool {
+	if c.learn == nil {
+		return false
+	}
+	_, gen := c.learn.Addrs(func(string) bool { return false })
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return gen != c.learnGen && time.Since(c.learnApplied) >= 10*time.Second
+}
+
+// preResolve resolves the host names written in routing rules now and
+// every 10 minutes, so their addresses map back to a name (DESIGN §4.8 L4).
+func (c *captureRuntime) preResolve(ctx context.Context) {
+	for {
+		for _, h := range c.rules().RoutedHosts() {
+			rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			addrs, err := c.resolver.LookupNetIP(rctx, "ip", h)
+			cancel()
+			if err == nil {
+				c.learn.Add(h, addrs, 15*time.Minute)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(10 * time.Minute):
+		}
+	}
 }
 
 // Serve runs the DNS front end and the TPROXY inbound until ctx ends, and
@@ -174,6 +236,9 @@ func (c *captureRuntime) Serve(ctx context.Context) {
 	if c.doh != nil {
 		go c.refreshDoH(ctx)
 	}
+	if c.learn != nil {
+		go c.preResolve(ctx)
+	}
 	t := time.NewTicker(2 * time.Second)
 	defer t.Stop()
 	saved := time.Now()
@@ -186,6 +251,7 @@ func (c *captureRuntime) Serve(ctx context.Context) {
 		c.mu.Lock()
 		changed := !slices.Equal(c.applied, c.rules().RoutedPrefixes()) || c.dohDirty.Swap(false)
 		c.mu.Unlock()
+		changed = changed || c.learnChanged()
 		if changed {
 			if err := c.apply(); err != nil {
 				log.Printf("tailproxy: capture: updating nft rules after a rule change: %v", err)
@@ -260,6 +326,12 @@ func (c *captureRuntime) Summary() (capState, capDetail, dnsState, dnsDetail str
 	}
 	if c.opts.BlockDoTDoQ {
 		capDetail += "；DoT/DoQ 853 已封堵"
+	}
+	if c.learn != nil {
+		capDetail += fmt.Sprintf("；已学习 %d 个地址", c.learn.Len())
+	}
+	if d.StripECH {
+		dnsDetail += fmt.Sprintf("；剥离 ECH %d", d.ECHStripped.Load())
 	}
 	return "running", capDetail, "running", dnsDetail
 }

@@ -4,6 +4,7 @@ package rule
 import (
 	"fmt"
 	"net/netip"
+	"sort"
 	"strings"
 
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/config"
@@ -185,5 +186,33 @@ func (e *Engine) RoutedPrefixes() []netip.Prefix {
 			out = append(out, r.prefixes...)
 		}
 	}
+	return out
+}
+
+// RoutedHosts returns the host names written in domain and domain_suffix
+// conditions of rules whose target is not direct (a suffix contributes the
+// name itself, e.g. "openai.com"). They are resolved periodically so their
+// addresses map back to a name (DESIGN §4.8 L4); keywords cannot be.
+func (e *Engine) RoutedHosts() []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(h string) {
+		if h != "" && !seen[h] && strings.Contains(h, ".") {
+			seen[h] = true
+			out = append(out, h)
+		}
+	}
+	for _, r := range e.rules {
+		if r.final || r.target == config.TargetDirect {
+			continue
+		}
+		for h := range r.exact {
+			add(h)
+		}
+		for _, s := range r.suffixes {
+			add(s)
+		}
+	}
+	sort.Strings(out)
 	return out
 }

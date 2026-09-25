@@ -47,6 +47,12 @@ type Server struct {
 	// Block, if set, makes listed names (public DoH endpoints, DESIGN §4.8
 	// L2) answer NXDOMAIN.
 	Block func(name string) bool
+	// StripECH removes the ech parameter from forwarded HTTPS/SVCB answers
+	// (DESIGN §4.8 L3), so clients send the real name in the SNI.
+	StripECH bool
+	// Observe, if set, sees the addresses of every forwarded A/AAAA answer
+	// under the name the client asked for (DESIGN §4.8 L4: learning).
+	Observe func(name string, addrs []netip.Addr, ttl time.Duration)
 	// TTL of fake answers, in seconds (default 10). Short, so clients ask
 	// again soon after a rule change.
 	TTL uint32
@@ -55,7 +61,7 @@ type Server struct {
 	Dialer net.Dialer
 	Logf   func(string, ...any)
 
-	Queries, Fake, Forwarded, Failed, CanaryHits, Blocked atomic.Int64
+	Queries, Fake, Forwarded, Failed, CanaryHits, Blocked, ECHStripped atomic.Int64
 }
 
 func (s *Server) logf(format string, args ...any) {
@@ -201,7 +207,90 @@ func (s *Server) handle(ctx context.Context, q []byte, tcp bool) []byte {
 		return reply(hdr, &question, dnsmessage.RCodeServerFailure, nil)
 	}
 	s.Forwarded.Add(1)
+	switch question.Type {
+	case typeHTTPS, typeSVCB:
+		if s.StripECH {
+			if out, ok := stripECH(resp); ok {
+				s.ECHStripped.Add(1)
+				resp = out
+			}
+		}
+	case dnsmessage.TypeA, dnsmessage.TypeAAAA:
+		if s.Observe != nil {
+			if addrs, ttl := answerAddrs(resp); len(addrs) > 0 {
+				s.Observe(name, addrs, ttl)
+			}
+		}
+	}
 	return resp
+}
+
+// stripECH removes the ech SvcParam from HTTPS/SVCB answers; ok is false
+// when there was none (resp is then returned unchanged by the caller).
+func stripECH(resp []byte) ([]byte, bool) {
+	var m dnsmessage.Message
+	if err := m.Unpack(resp); err != nil {
+		return nil, false
+	}
+	changed := false
+	for i := range m.Answers {
+		switch b := m.Answers[i].Body.(type) {
+		case *dnsmessage.HTTPSResource:
+			changed = b.DeleteParam(dnsmessage.SVCParamECH) || changed
+		case *dnsmessage.SVCBResource:
+			changed = b.DeleteParam(dnsmessage.SVCParamECH) || changed
+		}
+	}
+	if !changed {
+		return nil, false
+	}
+	out, err := m.Pack()
+	if err != nil {
+		return nil, false
+	}
+	return out, true
+}
+
+// answerAddrs returns the A/AAAA addresses in resp and their smallest TTL.
+func answerAddrs(resp []byte) ([]netip.Addr, time.Duration) {
+	var p dnsmessage.Parser
+	if _, err := p.Start(resp); err != nil {
+		return nil, 0
+	}
+	if err := p.SkipAllQuestions(); err != nil {
+		return nil, 0
+	}
+	var out []netip.Addr
+	ttl := uint32(0)
+	for {
+		h, err := p.AnswerHeader()
+		if err != nil {
+			break
+		}
+		switch h.Type {
+		case dnsmessage.TypeA:
+			r, err := p.AResource()
+			if err != nil {
+				return out, time.Duration(ttl) * time.Second
+			}
+			out = append(out, netip.AddrFrom4(r.A))
+		case dnsmessage.TypeAAAA:
+			r, err := p.AAAAResource()
+			if err != nil {
+				return out, time.Duration(ttl) * time.Second
+			}
+			out = append(out, netip.AddrFrom16(r.AAAA))
+		default:
+			if p.SkipAnswer() != nil {
+				return out, time.Duration(ttl) * time.Second
+			}
+			continue
+		}
+		if ttl == 0 || h.TTL < ttl {
+			ttl = h.TTL
+		}
+	}
+	return out, time.Duration(ttl) * time.Second
 }
 
 // fakeAnswer is the answer section for a name that goes through tailproxy.

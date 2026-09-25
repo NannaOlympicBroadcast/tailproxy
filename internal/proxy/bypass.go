@@ -12,7 +12,7 @@ import (
 // domain came from (DESIGN §4.8 L0), so the effect of apps that resolve
 // through their own DoH can be measured rather than guessed.
 type bypassStats struct {
-	transparent, fakeip, sniffed, unknown, ech, dohBlocked atomic.Int64
+	transparent, fakeip, sniffed, learned, unknown, ech, dohBlocked atomic.Int64
 
 	mu         sync.Mutex
 	unknownDst map[string]int64 // ip:port with no domain -> count
@@ -26,6 +26,8 @@ func (b *bypassStats) observe(d Dest) {
 	switch {
 	case d.DomainSrc == "fakeip":
 		b.fakeip.Add(1)
+	case d.DomainSrc == "learned":
+		b.learned.Add(1)
 	case d.Domain != "":
 		b.sniffed.Add(1)
 	default:
@@ -50,6 +52,7 @@ type BypassView struct {
 	Transparent int64       `json:"transparent"` // captured connections
 	FakeIP      int64       `json:"fakeip"`      // domain from the FakeIP table
 	Sniffed     int64       `json:"sniffed"`     // domain from SNI / Host
+	Learned     int64       `json:"learned"`     // domain from learned DNS answers
 	Unknown     int64       `json:"unknown"`     // no domain: IP rules only
 	ECH         int64       `json:"ech"`         // ClientHello with ECH
 	DoHBlocked  int64       `json:"doh_blocked"` // refused: SNI is a DoH endpoint
@@ -63,7 +66,7 @@ type DestCount struct {
 }
 
 func (b *bypassStats) view() BypassView {
-	v := BypassView{Transparent: b.transparent.Load(), FakeIP: b.fakeip.Load(), Sniffed: b.sniffed.Load(),
+	v := BypassView{Transparent: b.transparent.Load(), FakeIP: b.fakeip.Load(), Sniffed: b.sniffed.Load(), Learned: b.learned.Load(),
 		Unknown: b.unknown.Load(), ECH: b.ech.Load(), DoHBlocked: b.dohBlocked.Load()}
 	b.mu.Lock()
 	for d, n := range b.unknownDst {

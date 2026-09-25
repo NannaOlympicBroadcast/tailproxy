@@ -28,6 +28,7 @@ import (
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/config"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/dnsserver"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/fakeip"
+	"github.com/NannaOlympicBroadcast/tailproxy/internal/iplearn"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/proxy"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/rule"
 )
@@ -55,6 +56,7 @@ func TestTProxyIntegration(t *testing.T) {
 		return
 	}
 	netnsTest(t)
+	netnsLearnTest(t)
 }
 
 // setupLoopback returns whether IPv6 routing could be set up too.
@@ -101,8 +103,9 @@ func setupLoopback(t *testing.T) (v6 bool) {
 	return v6
 }
 
-// upstreamDNS answers every A query with 127.0.0.1 and AAAA with ::1.
-func upstreamDNS(t *testing.T) string {
+// upstreamDNS answers every A query with 127.0.0.1 (or the address in
+// special for that name) and AAAA with ::1.
+func upstreamDNS(t *testing.T, special ...map[string][4]byte) string {
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +127,13 @@ func upstreamDNS(t *testing.T) string {
 			h := dnsmessage.ResourceHeader{Name: qq.Name, Type: qq.Type, Class: dnsmessage.ClassINET, TTL: 60}
 			switch qq.Type {
 			case dnsmessage.TypeA:
-				r.Answers = []dnsmessage.Resource{{Header: h, Body: &dnsmessage.AResource{A: [4]byte{127, 0, 0, 1}}}}
+				a := [4]byte{127, 0, 0, 1}
+				if len(special) > 0 {
+					if s, ok := special[0][strings.TrimSuffix(qq.Name.String(), ".")]; ok {
+						a = s
+					}
+				}
+				r.Answers = []dnsmessage.Resource{{Header: h, Body: &dnsmessage.AResource{A: a}}}
 			case dnsmessage.TypeAAAA:
 				r.Answers = []dnsmessage.Resource{{Header: h, Body: &dnsmessage.AAAAResource{AAAA: netip.IPv6Loopback().As16()}}}
 			}
@@ -147,8 +156,9 @@ func (e *testEgress) Dial(ctx context.Context, target, host string, port uint16)
 	e.mu.Lock()
 	e.seen = append(e.seen, target+" "+host)
 	e.mu.Unlock()
-	d := net.Dialer{Control: capture.BypassControl, Resolver: e.resolver}
-	c, err := d.DialContext(ctx, "tcp", net.JoinHostPort(host, fmt.Sprint(port)))
+	// Stand-in for an exit: every name is served by the local origin.
+	d := net.Dialer{Control: capture.BypassControl}
+	c, err := d.DialContext(ctx, "tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)))
 	return c, target, err
 }
 
@@ -417,4 +427,122 @@ func netnsTest(t *testing.T) {
 		}
 	}
 	t.Logf("eg saw: %v", eg.seen)
+}
+
+// netnsLearnTest: real-IP DNS mode with learning (DESIGN §4.8 L4). The
+// client resolves a routed name to a real address, connects without
+// revealing the name (no SNI, no Host), and the learned DNS answer still
+// routes it to the egress.
+func netnsLearnTest(t *testing.T) {
+	var logMu sync.Mutex
+	logDone := false
+	logf := func(format string, args ...any) {
+		logMu.Lock()
+		defer logMu.Unlock()
+		if !logDone {
+			t.Logf(format, args...)
+		}
+	}
+	defer func() { logMu.Lock(); logDone = true; logMu.Unlock() }()
+
+	upstream := upstreamDNS(t, map[string][4]byte{"real.egress.test": {198, 51, 100, 77}})
+	oln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer oln.Close()
+	port := oln.Addr().(*net.TCPAddr).Port
+	got := make(chan string, 1)
+	go func() {
+		c, err := oln.Accept()
+		if err != nil {
+			return
+		}
+		b := make([]byte, 16)
+		n, _ := c.Read(b)
+		got <- string(b[:n])
+		c.Write([]byte("PONG"))
+		c.Close()
+	}()
+
+	engine, _ := rule.Compile([]config.Rule{{DomainSuffix: []string{"egress.test"}, Egress: "vps"}})
+	rules := func() *rule.Engine { return engine }
+	learn := iplearn.New()
+	bypass := net.Dialer{Control: capture.BypassControl}
+	tracker := proxy.NewTracker()
+	router := &proxy.Router{Rules: rules, Egress: &testEgress{}, Tracker: tracker, Direct: bypass}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dns := &dnsserver.Server{Rules: rules, Upstreams: []string{upstream}, Dialer: bypass, Logf: logf, StripECH: true,
+		Observe: func(name string, addrs []netip.Addr, ttl time.Duration) {
+			if rules().DomainMayRoute(name) {
+				learn.Add(name, addrs, ttl)
+			}
+		}}
+	pc, dln, err := dnsserver.Listen("127.0.0.1:11054")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go dns.Serve(ctx, pc, dln)
+	const tport = 17894
+	lns, err := capture.ListenTProxy(tport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := &proxy.Transparent{Router: router, ListenPort: tport, Logf: logf, Learned: learn.Lookup, SniffTimeout: 200 * time.Millisecond}
+	for _, ln := range lns {
+		go in.Serve(ctx, ln)
+	}
+	opts := capture.Options{Scope: capture.ScopeSelective, TProxyPort: tport, DNSPort: 11054}
+	if err := capture.Setup(opts); err != nil {
+		t.Fatal(err)
+	}
+	defer capture.Teardown()
+
+	sysResolver := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, "192.0.2.53:53")
+	}}
+	addrs, err := sysResolver.LookupNetIP(ctx, "ip4", "real.egress.test")
+	if err != nil || len(addrs) != 1 || addrs[0].String() != "198.51.100.77" {
+		t.Fatalf("real-mode answer: %v %v", addrs, err)
+	}
+	if name, ok := learn.Lookup(addrs[0]); !ok || name != "real.egress.test" {
+		t.Fatalf("not learned: %q", name)
+	}
+	// What captureRuntime.apply does: capture learned addresses of routed names.
+	learned, _ := learn.Addrs(rules().DomainMayRoute)
+	for _, a := range learned {
+		opts.Route = append(opts.Route, netip.PrefixFrom(a, 32))
+	}
+	if err := capture.Setup(opts); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := net.DialTimeout("tcp", fmt.Sprintf("198.51.100.77:%d", port), 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Write([]byte("PING")) // no SNI, no Host: only the learned answer names it
+	c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	reply := make([]byte, 4)
+	io.ReadFull(c, reply)
+	c.Close()
+	if string(reply) != "PONG" || <-got != "PING" {
+		t.Fatalf("learned route: reply %q", reply)
+	}
+	var found bool
+	snap := tracker.Snapshot()
+	for _, v := range append(snap.Active, snap.Recent...) {
+		t.Logf("learn conn: %s:%d src=%s dest_ip=%s -> %s via %s err=%q", v.Host, v.Port, v.DomainSrc, v.DestIP, v.Target, v.Via, v.Error)
+		if v.Host == "real.egress.test" && v.DomainSrc == "learned" && v.Target == "vps" && v.DestIP == "198.51.100.77" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("connection not routed by the learned name")
+	}
+	if tracker.Snapshot().Bypass.Learned != 1 {
+		t.Fatalf("learned counter: %+v", tracker.Snapshot().Bypass)
+	}
 }

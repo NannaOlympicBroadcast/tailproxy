@@ -115,3 +115,23 @@ func TestDomainMayRoute(t *testing.T) {
 		t.Error("final egress")
 	}
 }
+
+func TestRoutedHosts(t *testing.T) {
+	e := mustEngine(t, []config.Rule{
+		{Domain: []string{"Chat.OpenAI.com", "api.example"}, Egress: "us"},
+		{DomainSuffix: []string{".anthropic.com", "localhost"}, Egress: "us"},
+		{DomainKeyword: []string{"google"}, Egress: "us"},
+		{Domain: []string{"direct.example"}, Egress: config.TargetDirect},
+		{Final: "us"},
+	})
+	got := e.RoutedHosts()
+	want := []string{"anthropic.com", "api.example", "chat.openai.com"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v", got)
+		}
+	}
+}

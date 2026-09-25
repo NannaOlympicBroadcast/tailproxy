@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net"
+	"net/netip"
 	"time"
 
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/fakeip"
@@ -28,7 +29,11 @@ type Transparent struct {
 	// BlockDomain, if set, refuses connections to listed names (public DoH
 	// endpoints seen in SNI, DESIGN §4.8 L2).
 	BlockDomain func(string) bool
-	Logf        func(string, ...any)
+	// Learned, if set, maps a real address back to the name it was
+	// resolved for (DESIGN §4.8 L4). It is used when sniffing finds no
+	// name, and in place of an ECH outer SNI.
+	Learned func(netip.Addr) (string, bool)
+	Logf    func(string, ...any)
 }
 
 func (t *Transparent) logf(format string, args ...any) {
@@ -103,6 +108,13 @@ func (t *Transparent) handle(ctx context.Context, client net.Conn) {
 		in = wrapped
 		if res.Host != "" {
 			d.Domain, d.DomainSrc, d.ECH = res.Host, res.Protocol, res.ECH
+		}
+		// ECH's outer SNI is only the provider's public name: a name the
+		// client actually resolved to this address is better.
+		if (d.Domain == "" || d.ECH) && t.Learned != nil {
+			if name, ok := t.Learned(ip); ok {
+				d.Domain, d.DomainSrc = name, "learned"
+			}
 		}
 	}
 

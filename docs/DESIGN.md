@@ -209,7 +209,7 @@
 | L1 网络信号（零配置） | ① 让 `use-application-dns.net` 返回 NXDOMAIN；② tailproxy 自己作为系统 DNS | ① Firefox 解析 canary 域名得到 NXDOMAIN、其他错误码，或者 NOERROR 但没有 A/AAAA 记录时，就会关闭**默认开启的** DoH；但对用户手动开启的 DoH 无效 [来源 S35]。② Chrome 在未设置策略时，只会把 DoH 请求发给「与系统解析器相关联」的解析器 [来源 S36]，tailproxy 的本地解析器不属于这种情况〔无来源·待验证：本地地址不会被识别为已知 DoH 提供方〕 | 开 |
 | L2 封堵加密 DNS 通道 | ① DoH 端点：按域名列表（DNS 阶段直接返回 NXDOMAIN，SNI 阶段拒绝连接）和 IP 列表（只拦 443 端口）拦截，拒绝时回 TCP RST / ICMP 不可达，让客户端尽快回落；② DoT 的 TCP 853 和 DoQ 的 UDP 853 同样拒绝 | ① Chrome 的 automatic 模式遇到错误时「可能回落到非加密查询」，secure 模式则直接解析失败 [来源 S36]；Firefox 有 `Fallback` 策略控制是否回落到系统 DNS [来源 S37]；公开的 DoH 域名和 IP 列表每小时自动更新 [来源 S38]。② DoT 使用 TCP 853 端口 [来源 S39]，DoQ 使用 UDP 853 端口 [来源 S40] | 开，允许加白名单 |
 | L3 剥离 ECH 配置 | 删除 HTTPS/SVCB 应答中的 `ech` 参数，只在 `dns.mode: real` 时默认开启 | Chrome 在使用非加密 DNS 时也会查询 HTTPS（type 65）记录 [来源 S41]；ECH 配置通过 SVCB/HTTPS 记录下发，没有配置的客户端只发 GREASE ECH，外层 SNI 仍是真实域名 [来源 S30]；但客户端可能已经缓存了 ECH 配置 [来源 S42]。FakeIP 模式下有了域名就不需要 SNI，所以不必剥离〔无来源·设计决策〕 | real 模式开，FakeIP 模式关 |
-| L4 域名未知时兜底 | ① 规则域名预解析：对 `domain` / `domain_suffix` 中明确列出的主机名，通过对应出口定期解析，把得到的 IP 放进带 TTL 的动态 IP 集合，同时从所有经过的 DNS 应答中学习；② 可选规则 `outer_sni`：按 ECH 外层 SNI（如 CDN 公共名）粗粒度分流；③ `unknown_domain` 策略：默认只按 IP 规则匹配，也可以指定出口或拒绝 | ① 与 App Connector 用 DoH 解析域名再通告 IP 是同一思路，也有同样的共享 IP 误伤问题 [来源 S3]；`domain_keyword` 无法预解析〔无来源·设计决策〕 | ① 开；②③ 按需配置 |
+| L4 域名未知时兜底 | ① 规则域名预解析：对 `domain` / `domain_suffix` 中明确列出的主机名定期解析（**实现说明**：用的是本地上游，而不是对应出口。自带 DoH 的应用在本地解析，拿到的是按本地位置调度的 CDN 地址，用本地上游解析才能对上这些地址〔无来源·设计决策〕），把得到的 IP 放进带 TTL 的动态 IP 集合，同时从所有经过的 DNS 应答中学习；② 可选规则 `outer_sni`：按 ECH 外层 SNI（如 CDN 公共名）粗粒度分流；③ `unknown_domain` 策略：默认只按 IP 规则匹配，也可以指定出口或拒绝 | ① 与 App Connector 用 DoH 解析域名再通告 IP 是同一思路，也有同样的共享 IP 误伤问题 [来源 S3]；`domain_keyword` 无法预解析〔无来源·设计决策〕 | ① 开；②③ 按需配置 |
 | L5 托管模式（需用户明确执行） | `tailproxy doctor --apply-browser-policy`：写入 Chrome/Edge 的 `DnsOverHttpsMode=off`（可选 `EncryptedClientHelloEnabled=false`），以及 Firefox 的 `DNSOverHTTPS {Enabled:false, Locked:true}`；执行前打印即将写入的内容，并支持一键撤销 | Chrome 的 `DnsOverHttpsMode` 取 `off` 时关闭 DoH [来源 S36]；`EncryptedClientHelloEnabled` 设为 false 时 Chrome 不启用 ECH [来源 S43]；Firefox `DNSOverHTTPS` 策略支持 `Enabled` / `Locked` / `Fallback` [来源 S37] | 关 |
 
 **剩余风险**：应用把 DoH 服务器的 IP 写死在代码里（不在公开列表中），同时连接又使用了 ECH，这种情况在不解密的前提下无法识别域名，只能按 IP 规则或 `unknown_domain` 策略处理；影响范围由 L0 统计给出。〔无来源·设计决策〕
@@ -327,7 +327,7 @@ rules:
 | 阶段 | 内容 | 验收 |
 |---|---|---|
 | M0 PoC | 两个 tsnet 槽位加 SOCKS5 入口，支持 keyword/CIDR 规则 | 通过两个槽位访问 IP 回显服务，返回的是两个不同出口的公网 IP。**状态：已验收（2026-09-24）**：在真实 tailnet 上，同一客户端经中国、美国两个出口分别得到 106.52.30.242 和 186.244.245.39（出口节点和中继两种方式都验证过，见 README） |
-| M1 Linux | nft TPROXY、FakeIP DNS、SNI/HTTP 嗅探、回环防护、CLI | 路由器（OpenWrt）上透明分流，没有 DNS 泄漏。**状态**：TPROXY（selective / all）、策略路由（netlink）、FakeIP + 分流 DNS、DNS 劫持、canary、SNI/Host 嗅探、防回环、`capture down`、L2 DoH/DoT/DoQ 封堵、L0 可见度统计都已实现，并在网络命名空间里做了集成测试；UDP 代理、L3 ECH 剥离（real 模式）、L4 规则域名预解析尚未实现；验收项需要真实路由器，尚未完成 |
+| M1 Linux | nft TPROXY、FakeIP DNS、SNI/HTTP 嗅探、回环防护、CLI | 路由器（OpenWrt）上透明分流，没有 DNS 泄漏。**状态**：TPROXY（selective / all）、策略路由（netlink）、FakeIP + 分流 DNS、DNS 劫持、canary、SNI/Host 嗅探、防回环、`capture down`、L2 DoH/DoT/DoQ 封堵、L3 ECH 剥离、L4 规则域名预解析与应答学习、L0 可见度统计都已实现，并在网络命名空间里做了集成测试；UDP 代理、L4 的 `outer_sni` 规则、L5 浏览器策略尚未实现；验收项需要真实路由器，尚未完成 |
 | M2 桌面 | Windows Wintun、macOS utun、与系统 Tailscale 共存 | 官方客户端保持 tailnet 访问，tailproxy 负责出口分流 |
 | M3 移动 | Android VpnService、iOS NEPacketTunnelProvider（gomobile） | 单个 VPN 同时提供 tailnet 访问和多出口分流 |
 | M4 生态 | Rule Provider、出口组健康检查、指标、GUI | — |
