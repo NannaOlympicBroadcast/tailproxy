@@ -26,6 +26,9 @@ func (r *Router) SetRoutes(routes []netip.Prefix) error { return errUnsupported 
 // SetSystemDNS is not available here.
 func (r *Router) SetSystemDNS(addr netip.Addr) error { return errUnsupported }
 
+// SetExcludes is not available here.
+func (r *Router) SetExcludes(prefixes []netip.Prefix) error { return errUnsupported }
+
 // Close is a no-op.
 func (r *Router) Close() error { return nil }
 

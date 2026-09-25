@@ -275,7 +275,10 @@ func TestStackRejectUDP(t *testing.T) {
 	}
 	defer func() { sniffWrites = nil }()
 	client := newClientHost(t)
-	s, err := New(client.device(), Options{DNSAddr: netip.MustParseAddr("172.19.0.2"), DNS: fakeDNS{}, RejectUDP: true})
+	// Only UDP to the FakeIP pool is refused (the default-route case);
+	// other UDP reaches the UDP listener.
+	fake := netip.MustParsePrefix("198.18.0.0/15")
+	s, err := New(client.device(), Options{DNSAddr: netip.MustParseAddr("172.19.0.2"), DNS: fakeDNS{}, RejectUDP: true, RejectUDPTo: fake.Contains})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,6 +298,28 @@ func TestStackRejectUDP(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("no ICMP port unreachable")
+	}
+
+	got := make(chan netip.AddrPort, 1)
+	go func() {
+		buf := make([]byte, 64)
+		if _, _, orig, err := s.UDPListener().ReadFrom(buf); err == nil {
+			got <- orig
+		}
+	}()
+	oc, err := client.dialUDP("203.0.113.5:9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer oc.Close()
+	oc.Write([]byte("other"))
+	select {
+	case orig := <-got:
+		if orig.String() != "203.0.113.5:9" {
+			t.Fatalf("UDP listener got %s", orig)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("UDP outside RejectUDPTo was not delivered")
 	}
 
 	q := dnsmessage.Message{Header: dnsmessage.Header{ID: 1}, Questions: []dnsmessage.Question{{Name: dnsmessage.MustNewName("a.example."), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET}}}

@@ -59,7 +59,9 @@ type TransparentUDP struct {
 	// Reply opens the socket that talks to the client for one flow: bound
 	// to orig and connected to client (capture.DialUDPReply). Replies must
 	// come from orig, or the client drops them.
-	Reply   func(orig, client netip.AddrPort) (net.Conn, error)
+	Reply func(orig, client netip.AddrPort) (net.Conn, error)
+	// Bypass is Transparent.Bypass for UDP flows.
+	Bypass  func(netip.Addr) string
 	Timeout time.Duration
 	Logf    func(string, ...any)
 
@@ -298,6 +300,8 @@ func (t *TransparentUDP) setup(ctx context.Context, f *udpFlow) error {
 			return errors.New("unknown FakeIP")
 		}
 		d.Domain, d.DomainSrc = name, "fakeip"
+	} else if t.Bypass != nil && t.Bypass(ip) != "" {
+		d.IP, d.Bypass = ip, t.Bypass(ip)
 	} else {
 		d.IP = ip
 		res := t.sniffQUIC(ctx, f)

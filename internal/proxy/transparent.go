@@ -36,7 +36,11 @@ type Transparent struct {
 	// name, including when the ClientHello uses ECH: its SNI is then only
 	// the outer (public) name, kept apart as Dest.OuterSNI.
 	Learned func(netip.Addr) (string, bool)
-	Logf    func(string, ...any)
+	// Bypass, if set, names destinations that go direct without rules or
+	// sniffing (excluded ranges under a TUN default route) by returning
+	// the reason; "" means route normally.
+	Bypass func(netip.Addr) string
+	Logf   func(string, ...any)
 }
 
 func (t *Transparent) logf(format string, args ...any) {
@@ -99,10 +103,13 @@ func (t *Transparent) handle(ctx context.Context, client net.Conn) {
 		d.Domain, d.DomainSrc = name, "fakeip"
 	} else {
 		d.IP = ip
+		if t.Bypass != nil {
+			d.Bypass = t.Bypass(ip)
+		}
 	}
 
 	var in net.Conn = client
-	if d.Domain == "" {
+	if d.Domain == "" && d.Bypass == "" {
 		timeout := t.SniffTimeout
 		if timeout == 0 {
 			timeout = DefaultSniffTimeout

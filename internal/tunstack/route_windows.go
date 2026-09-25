@@ -75,6 +75,11 @@ func (r *Router) SetRoutes(routes []netip.Prefix) error {
 	return errors.Join(errs...)
 }
 
+// SetExcludes is a no-op on Windows: excluded ranges are not routed out of
+// a default route into the device, so their traffic enters it and the
+// inbound sends it direct (bound to the physical interface).
+func (r *Router) SetExcludes(prefixes []netip.Prefix) error { return nil }
+
 // Close clears the adapter's DNS settings; the routes go with the adapter.
 func (r *Router) Close() error {
 	r.revertDNS()

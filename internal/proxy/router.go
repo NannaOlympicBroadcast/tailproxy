@@ -57,6 +57,10 @@ type Dest struct {
 	// Transparent is set for captured connections, where UnknownDomain
 	// applies.
 	Transparent bool
+	// Bypass, if set, sends the connection direct without matching rules
+	// (an excluded range captured by a TUN default route); it is the
+	// reason shown in the connection list.
+	Bypass string
 }
 
 // Connect matches host:port (a domain or an IP) against the rules and dials
@@ -87,11 +91,15 @@ func (r *Router) ConnectUDP(ctx context.Context, inbound, source string, d Dest)
 }
 
 func (r *Router) connect(ctx context.Context, network, inbound, source string, d Dest) (net.Conn, *Conn, error) {
-	q := rule.Query{Domain: d.Domain, IP: d.IP, Port: d.Port, OuterSNI: d.OuterSNI}
-	res := r.Rules().Match(q)
+	var res rule.Result
+	if d.Bypass != "" {
+		res = rule.Result{RuleIndex: -1, Target: config.TargetDirect, Reason: d.Bypass}
+	} else {
+		res = r.Rules().Match(rule.Query{Domain: d.Domain, IP: d.IP, Port: d.Port, OuterSNI: d.OuterSNI})
+	}
 	// An explicit outer_sni match is the user's answer for an unknown
 	// domain, so the unknown_domain policy does not override it.
-	if d.Transparent && d.Domain == "" && !res.ByOuterSNI {
+	if d.Transparent && d.Domain == "" && !res.ByOuterSNI && d.Bypass == "" {
 		switch {
 		case r.UnknownDomain == "reject":
 			res = rule.Result{RuleIndex: -1, Target: config.TargetReject, Reason: "domain unknown (dns.unknown_domain: reject)"}

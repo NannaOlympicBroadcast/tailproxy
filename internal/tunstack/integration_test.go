@@ -71,6 +71,9 @@ func testLogf(t *testing.T) (logf func(string, ...any), done func()) {
 		}
 }
 
+// escapeIP is a public address the host scenarios route into the device.
+const escapeIP = "1.1.1.1"
+
 // tunScenario creates a real TUN device named devName ("utun" on macOS
 // picks a free utunN), routes the FakeIP pool and the stack's DNS address
 // into it, and checks DNS, HTTP and UDP through it to the egress. With
@@ -111,7 +114,9 @@ func tunScenario(t *testing.T, devName string, systemDNS bool) {
 	pool, _ := fakeip.New(fakeip.DefaultInet4, fakeip.DefaultInet6)
 	eg := &egress{}
 	tracker := proxy.NewTracker()
-	router := &proxy.Router{Rules: rules, Egress: eg, Tracker: tracker}
+	// Direct dials leave through the physical interface (BypassControl),
+	// as in tailproxy.
+	router := &proxy.Router{Rules: rules, Egress: eg, Tracker: tracker, Direct: net.Dialer{Control: tunstack.BypassControl}}
 	dns := &dnsserver.Server{Pool: pool, Rules: rules, Upstreams: []string{"127.0.0.1:1"}, Logf: logf}
 
 	dev, err := tun.CreateTUN(devName, 1500)
@@ -128,7 +133,12 @@ func tunScenario(t *testing.T, devName string, systemDNS bool) {
 		t.Fatal(err)
 	}
 	defer rt.Close()
-	if err := rt.SetRoutes(append(pool.Prefixes(), netip.MustParsePrefix("172.19.0.2/32"))); err != nil {
+	routes := append(pool.Prefixes(), netip.MustParsePrefix("172.19.0.2/32"))
+	if systemDNS {
+		// A real Internet address routed into the device (host scenarios).
+		routes = append(routes, netip.MustParsePrefix(escapeIP+"/32"))
+	}
+	if err := rt.SetRoutes(routes); err != nil {
 		t.Fatal(err)
 	}
 
@@ -186,6 +196,30 @@ func tunScenario(t *testing.T, devName string, systemDNS bool) {
 	if !systemDNS {
 		return
 	}
+	// tailproxy's own direct dials leave the device: a plain HTTP request
+	// to an address routed into the TUN is served through the stack by a
+	// direct dial bound to the physical interface; if that dial looped
+	// back into the device, it would never connect. This is what capture
+	// scope all relies on.
+	hc := &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{DisableKeepAlives: true},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err = hc.Get("http://" + escapeIP + "/")
+	if err != nil {
+		t.Fatalf("HTTP to %s through the TUN: %v", escapeIP, err)
+	}
+	resp.Body.Close()
+	var direct bool
+	snap := tracker.Snapshot()
+	for _, c := range append(snap.Recent, snap.Active...) {
+		if c.Target == "direct" && (c.Host == escapeIP || c.DestIP == escapeIP) && c.Inbound == "tproxy" {
+			direct = true
+		}
+	}
+	if !direct {
+		t.Fatalf("no direct connection to %s recorded: %+v", escapeIP, snap.Recent)
+	}
+	t.Logf("HTTP %s through the TUN, direct dial out of it: %s", escapeIP, resp.Status)
+
 	before := systemDNSSnapshot(t)
 	if err := rt.SetSystemDNS(netip.MustParseAddr("172.19.0.2")); err != nil {
 		t.Fatal(err)

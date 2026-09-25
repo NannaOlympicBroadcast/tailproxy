@@ -124,3 +124,39 @@ func TestTransparentECHOuterSNI(t *testing.T) {
 		t.Fatalf("plain TLS: %+v", c)
 	}
 }
+
+// Bypass: an excluded destination goes direct with the given reason,
+// without rules, the unknown_domain policy or sniffing.
+func TestTransparentBypass(t *testing.T) {
+	eng, err := rule.Compile([]config.Rule{{IPCIDR: []string{"0.0.0.0/0"}, Egress: "us"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eg := &fakeEgress{}
+	tr := NewTracker()
+	r := &Router{Rules: func() *rule.Engine { return eng }, Egress: eg, Tracker: tr, UnknownDomain: "reject"}
+	in := &Transparent{Router: r, ListenPort: 7893, SniffTimeout: 5 * time.Second, Logf: t.Logf,
+		Bypass: func(ip netip.Addr) string {
+			if ip.IsLoopback() {
+				return "excluded range"
+			}
+			return ""
+		}}
+	a, b := net.Pipe()
+	defer a.Close()
+	start := time.Now()
+	// Nothing is written: a sniff would wait SniffTimeout.
+	in.handle(context.Background(), origConn{Conn: b, dst: net.TCPAddrFromAddrPort(netip.MustParseAddrPort("127.0.0.1:1"))})
+	c := waitFinished(t, tr, 1).Recent[0]
+	if c.Target != config.TargetDirect || c.Reason != "excluded range" || c.RuleIndex != -1 {
+		t.Fatalf("bypassed conn %+v", c)
+	}
+	if time.Since(start) > 3*time.Second {
+		t.Fatalf("bypass waited %v (sniffed?)", time.Since(start))
+	}
+	eg.mu.Lock()
+	defer eg.mu.Unlock()
+	if len(eg.dials) != 0 {
+		t.Fatalf("egress dialed: %v", eg.dials)
+	}
+}

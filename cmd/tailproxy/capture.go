@@ -49,7 +49,11 @@ type captureRuntime struct {
 	tunName   string
 	tunDNS    netip.Addr
 	sysDNS    string // system DNS state, for the panel
-	rules     func() *rule.Engine
+	// tunAll: capture.scope all in TUN mode (default route into the
+	// device); tunEx then decides what goes direct.
+	tunAll bool
+	tunEx  *tunExcludes
+	rules  func() *rule.Engine
 	// DoH block lists (nil when dns.anti_bypass.block_doh is off).
 	doh      *antibypass.Lists
 	dohFile  string
@@ -203,7 +207,28 @@ func setupCapture(cfg *config.Config, rules func() *rule.Engine, router *proxy.R
 		if n, err := dev.Name(); err == nil {
 			c.tunName = n
 		}
-		if c.tun, err = tunstack.New(dev, tunstack.Options{DNSAddr: c.tunDNS, DNS: c.dns, RejectUDP: !udpProxy, Logf: log.Printf}); err != nil {
+		topts := tunstack.Options{DNSAddr: c.tunDNS, DNS: c.dns, RejectUDP: !udpProxy, Logf: log.Printf}
+		if cfg.Capture.Scope == capture.ScopeAll {
+			// Every packet enters the device: excluded ranges go direct,
+			// and with udp: block only UDP to FakeIPs is refused, other
+			// UDP goes direct (as tproxy would not capture it).
+			c.tunAll = true
+			c.tunEx = &tunExcludes{def: mustPrefixList(capture.DefaultExclude)}
+			for _, p := range cfg.Capture.ExcludeCIDR {
+				if pr, err := config.ParsePrefix(p); err == nil {
+					c.tunEx.user = append(c.tunEx.user, pr)
+				}
+			}
+			c.in.Bypass = c.tunEx.reason
+			if c.udpIn == nil {
+				c.udpIn = &proxy.TransparentUDP{Router: router, Pool: c.pool, Logf: log.Printf,
+					Bypass: func(netip.Addr) string { return "capture.udp: block（不代理 UDP）" }}
+				topts.RejectUDPTo = func(ip netip.Addr) bool { return c.pool != nil && c.pool.Contains(ip) }
+			} else {
+				c.udpIn.Bypass = c.tunEx.reason
+			}
+		}
+		if c.tun, err = tunstack.New(dev, topts); err != nil {
 			dev.Close()
 			return nil, err
 		}
@@ -261,6 +286,14 @@ func setupCapture(cfg *config.Config, rules func() *rule.Engine, router *proxy.R
 }
 
 // apply installs the rules with the current routed prefixes.
+func mustPrefixList(ss []string) []netip.Prefix {
+	out := make([]netip.Prefix, 0, len(ss))
+	for _, s := range ss {
+		out = append(out, netip.MustParsePrefix(s))
+	}
+	return out
+}
+
 func (c *captureRuntime) apply() error {
 	routed := c.rules().RoutedPrefixes()
 	o := c.opts
@@ -283,7 +316,14 @@ func (c *captureRuntime) apply() error {
 		// TUN: the same prefixes are routed into the device, plus the
 		// stack's DNS address. DoH / DoT addresses are not blocked by IP
 		// here (no nftables); their names still are, in DNS and SNI.
-		routes := append(o.Route, netip.PrefixFrom(c.tunDNS, 32))
+		routes := append(slices.Clone(o.Route), netip.PrefixFrom(c.tunDNS, 32))
+		if c.tunAll {
+			c.tunEx.routed.Store(&routes)
+			routes = append(routes, tunDefaultRoutes...)
+			if err := c.tunRouter.SetExcludes(c.tunEx.all()); err != nil {
+				return err
+			}
+		}
 		if err := c.tunRouter.SetRoutes(routes); err != nil {
 			return err
 		}
@@ -460,6 +500,9 @@ func (c *captureRuntime) Summary() (capState, capDetail, dnsState, dnsDetail str
 	capDetail = fmt.Sprintf("TPROXY :%d，范围 %s", c.opts.TProxyPort, c.opts.Scope)
 	if c.tun != nil {
 		capDetail = fmt.Sprintf("TUN %s，范围 %s，DNS %s（系统 DNS %s）", c.tunName, c.opts.Scope, c.tunDNS, c.sysDNS)
+		if c.tunAll {
+			capDetail += "；默认路由进入 TUN，排除网段直连"
+		}
 	}
 	if c.udpIn != nil {
 		capDetail += fmt.Sprintf("；UDP 代理，活动流 %d", c.udpIn.Flows())

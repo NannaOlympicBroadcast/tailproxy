@@ -104,7 +104,6 @@ func TestCaptureConfig(t *testing.T) {
 		t.Fatalf("tun defaults: %+v dns %s", tunCfg.Capture, tunCfg.Capture.TUNDNSAddr())
 	}
 	for _, bad := range []string{
-		"capture: {mode: tun, scope: all}\nrules: []\n",
 		"capture: {mode: tun, tun_address: 172.19.0.1/31}\nrules: []\n",
 		"capture: {mode: tun, tun_address: 'fd00::1/64'}\nrules: []\n",
 		"capture: {mode: tun, tun_system_dns: yes}\nrules: []\n",
@@ -120,6 +119,9 @@ func TestCaptureConfig(t *testing.T) {
 		if _, err := Parse([]byte(bad)); err == nil {
 			t.Errorf("accepted: %s", bad)
 		}
+	}
+	if c, err := Parse([]byte("capture: {mode: tun, scope: all}\nrules: []\n")); err != nil || c.Capture.Scope != "all" {
+		t.Errorf("tun with scope all: %v", err)
 	}
 	if c, err := Parse([]byte("capture: {mode: tun, tun_system_dns: 'off'}\nrules: []\n")); err != nil || c.Capture.TUNSystemDNS != SystemDNSOff {
 		t.Errorf("tun_system_dns off: %v", err)

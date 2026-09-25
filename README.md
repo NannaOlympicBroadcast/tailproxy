@@ -18,7 +18,7 @@
 | Linux 透明捕获（`capture.mode: tproxy`）：nftables TPROXY + 策略路由、FakeIP / 分流 DNS、SNI / HTTP Host 嗅探、DNS 劫持、防回环 | 已实现；在网络命名空间里做了端到端集成测试，**尚未在真实路由器 / OpenWrt 上验证** |
 | `tpctl` 本机命令行：管理 tailproxy + 内置官方 tailscale 客户端（操作主节点）+ schema | 已实现；Linux / macOS 走 Unix 套接字，Windows 走命名管道（由 CI 在真实 Windows 上验证） |
 | UDP 代理（Linux 透明捕获，`capture.udp: proxy`）：按规则经出口节点 / 直连转发 UDP（如 QUIC） | 已实现；网络命名空间集成测试覆盖，**尚未在真实路由器和出口节点上验证**；中继出口不承载 UDP |
-| TUN 模式（`capture.mode: tun`）：TUN 设备 + gVisor 用户态协议栈，路由 + 协议栈内 DNS | Linux / macOS（utun）/ Windows（Wintun）已实现，三个平台都在 GitHub Actions 上用真实 TUN 设备跑通集成测试（DNS→FakeIP、TCP、UDP 到出口）；运行时自动把系统 DNS 指向协议栈内 DNS、退出时恢复（`capture.tun_system_dns`，CI 中三个平台都用系统解析器验证过）；Windows 需要 `wintun.dll`；只支持 selective 范围；Android / iOS 未实现；尚未在真实桌面上长期使用 |
+| TUN 模式（`capture.mode: tun`）：TUN 设备 + gVisor 用户态协议栈，路由 + 协议栈内 DNS | Linux / macOS（utun）/ Windows（Wintun）已实现，三个平台都在 GitHub Actions 上用真实 TUN 设备跑通集成测试（DNS→FakeIP、TCP、UDP 到出口）；运行时自动把系统 DNS 指向协议栈内 DNS、退出时恢复（`capture.tun_system_dns`，CI 中三个平台都用系统解析器验证过）；Windows 需要 `wintun.dll`；支持 selective 和 all 范围（all：Linux 在网络命名空间里用真实设备测试）；Android / iOS 未实现；尚未在真实桌面上长期使用 |
 
 ## 启动与管理
 
@@ -295,7 +295,13 @@ dns:
   mode: fakeip
 ```
 
-- 需要 root / 管理员权限。tailproxy 创建设备，把 FakeIP 地址池、规则里的 `ip_cidr`、学到的地址和 DNS 地址路由进设备。只支持 selective 范围。各平台的路由和防回环：
+- 需要 root / 管理员权限。tailproxy 创建设备，把 FakeIP 地址池、规则里的 `ip_cidr`、学到的地址和 DNS 地址路由进设备（`scope: selective`，默认）。
+- `scope: all`：默认路由也进入设备（拆成 `0.0.0.0/1`、`128.0.0.0/1`、`::/1`、`8000::/1`，系统原来的默认路由保留，仍指向物理网卡），所有 TCP/UDP 都经过规则，没有域名的连接靠 SNI / HTTP Host / QUIC 嗅探和学到的地址。
+  - 排除网段：`capture.exclude_cidr` 和与 tproxy 相同的默认排除（本机、局域网私有地址、链路本地、组播、保留地址、tailnet 的 100.64.0.0/10 和 fd7a:115c:a1e0::/48）直连、不经规则；被规则 `ip_cidr`、FakeIP 池或学到的地址覆盖的默认排除网段仍按规则走，`exclude_cidr` 总是优先。Linux 上排除网段用路由表 7894 里的 throw 路由退回 main 表，根本不进设备（ping 等也正常）；macOS / Windows 上它们会进入设备，由 tailproxy 绑定物理网卡直连，所以只有 TCP / UDP 可用（已直连的局域网网段有更具体的系统路由，不受影响）。
+  - `udp: block` 时只有发往 FakeIP 的 UDP 立即不可达，其他 UDP 直连（和 tproxy 不捕获 UDP 的效果一致）；`udp: proxy` 时 UDP 按规则走。
+  - ICMP（ping）到被捕获的地址没有响应；启用前已建立、且目的地址被捕获的连接可能中断（协议栈里没有它们的状态，未实测）。
+  - 验证情况：Linux 在网络命名空间里用真实设备测试（被规则捕获的地址到达出口、排除网段不进设备、关闭后 throw 路由删除）；macOS / Windows 的 CI 测试验证了 tailproxy 自己的直连会绑定物理网卡离开设备（把 1.1.1.1/32 路由进 TUN 后，HTTP 请求经协议栈直连成功），但为了不切断 CI runner 自己的连接，没有在 runner 上装默认路由；尚未在真实桌面上用 all 范围长期使用。
+- 各平台的路由和防回环：
   - **Linux**：独立路由表 7894（策略规则优先级 9895）；带绕行标记 `0x80000` 的包（tailproxy 自己的直连、上游 DNS，以及 tsnet）先查 main 表（优先级 9894），不会回环。
   - **macOS**：设备名固定为 `utunN`（内核分配 N，`tun_name` 不以 `utun` 开头时忽略）；用 `ifconfig` / `route` 添加指向该接口的路由；tailproxy 自己的出站套接字用 `IP_BOUND_IF` 绑定到默认路由所在的物理网卡。
   - **Windows**：Wintun，需要把 [wintun.dll](https://www.wintun.net) 放在 `tailproxy.exe` 同一目录；地址和路由通过 IP Helper API 设置；出站套接字用 `IP_UNICAST_IF` 绑定到默认路由网卡。

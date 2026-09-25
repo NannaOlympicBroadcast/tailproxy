@@ -55,8 +55,11 @@ type Options struct {
 	UDPTimeout time.Duration
 	// RejectUDP answers UDP (except in-stack DNS) with ICMP port
 	// unreachable, so clients fall back to TCP at once (capture.udp: block).
-	RejectUDP bool
-	Logf      func(string, ...any)
+	// With RejectUDPTo set, only UDP to the addresses it reports is
+	// refused (FakeIPs when the device takes the default route).
+	RejectUDP   bool
+	RejectUDPTo func(netip.Addr) bool
+	Logf        func(string, ...any)
 }
 
 // Stack is a netstack attached to a TUN device.
@@ -236,7 +239,7 @@ func (s *Stack) acceptTCP(r *tcp.ForwarderRequest) {
 func (s *Stack) acceptUDP(r *udp.ForwarderRequest) bool {
 	id := r.ID()
 	k := flowKey{client: addrPort(id.RemoteAddress, id.RemotePort), orig: addrPort(id.LocalAddress, id.LocalPort)}
-	if s.opts.RejectUDP && !s.isDNS(k.orig) {
+	if s.opts.RejectUDP && !s.isDNS(k.orig) && (s.opts.RejectUDPTo == nil || s.opts.RejectUDPTo(k.orig.Addr())) {
 		return false // unhandled: the stack replies port unreachable
 	}
 	var wq waiter.Queue

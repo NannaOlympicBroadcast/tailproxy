@@ -430,9 +430,6 @@ func (c *Config) validateCapture(egressNames map[string]bool) []error {
 	switch c.Capture.Mode {
 	case "", CaptureAuto, CaptureSOCKS, CaptureTProxy:
 	case CaptureTUN:
-		if c.Capture.Scope == "all" {
-			errs = append(errs, errors.New("capture.scope: all is not supported with capture.mode tun yet (only selective)"))
-		}
 		if c.Capture.TUNAddress != "" {
 			p, err := netip.ParsePrefix(c.Capture.TUNAddress)
 			switch {

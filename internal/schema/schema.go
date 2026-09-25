@@ -57,7 +57,7 @@ var fields = map[string]meta{
 	"dns.unknown_domain":             {desc: "透明捕获时拿不到域名的连接：ip_rules_only、reject 或 egress:<名称>", pattern: `^(ip_rules_only|reject|egress:[a-z0-9-]+)$`, def: "ip_rules_only"},
 	"capture":                        {desc: "流量入口"},
 	"capture.mode":                   {desc: "auto / socks：只开 SOCKS5；tproxy：Linux nftables 透明捕获（需 root）；tun：TUN 设备 + 用户态协议栈（Linux / macOS / Windows，需 root / 管理员）", enum: []string{"auto", "socks", "tproxy", "tun"}, def: "auto"},
-	"capture.scope":                  {desc: "捕获范围：selective 只接管 FakeIP 与规则 ip_cidr；all 接管全部 TCP（仅 tproxy）", enum: []string{"selective", "all"}, def: "selective"},
+	"capture.scope":                  {desc: "捕获范围：selective 只接管 FakeIP 与规则 ip_cidr；all 接管全部流量（tproxy：全部 TCP；tun：默认路由进入 TUN），排除网段直连", enum: []string{"selective", "all"}, def: "selective"},
 	"capture.tun_name":               {desc: "tun 模式的设备名", def: "tailproxy0"},
 	"capture.tun_address":            {desc: "tun 设备地址（IPv4，/30 或更大）；下一个地址是协议栈内的 DNS，系统 DNS 指向它", def: "172.19.0.1/30"},
 	"capture.tun_system_dns":         {desc: "tun 模式运行时把系统 DNS 指向协议栈内的 DNS，退出时恢复（Linux 用 systemd-resolved，macOS 用 networksetup，Windows 设置 TUN 网卡 DNS）；off 不改系统 DNS", enum: []string{"auto", "off"}, def: "auto"},

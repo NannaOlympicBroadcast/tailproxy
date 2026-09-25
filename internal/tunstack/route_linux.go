@@ -33,6 +33,7 @@ type Router struct {
 
 	mu      sync.Mutex
 	applied map[netip.Prefix]bool
+	thrown  map[netip.Prefix]bool
 	dnsSet  bool
 }
 
@@ -67,7 +68,7 @@ func NewRouter(dev tun.Device, addr netip.Prefix) (*Router, error) {
 	if err := conn.Link.Set(&rtnetlink.LinkMessage{Family: unix.AF_UNSPEC, Index: uint32(ifc.Index), Flags: unix.IFF_UP, Change: unix.IFF_UP}); err != nil {
 		return nil, fmt.Errorf("tun: link up: %w", err)
 	}
-	r := &Router{name: name, applied: map[netip.Prefix]bool{}}
+	r := &Router{name: name, applied: map[netip.Prefix]bool{}, thrown: map[netip.Prefix]bool{}}
 	if err := rules(true); err != nil {
 		rules(false)
 		return nil, err
@@ -115,10 +116,60 @@ func (r *Router) SetRoutes(routes []netip.Prefix) error {
 	return errors.Join(errs...)
 }
 
-// Close reverts system DNS and removes the policy rules. The device's
-// routes go with the device.
+// SetExcludes makes exactly prefixes skip the device's table: "throw"
+// routes there send lookups on to the main table (ip route add throw P
+// table 7894), so excluded ranges keep their normal path even under a
+// default route into the device. More specific routes still win.
+func (r *Router) SetExcludes(prefixes []netip.Prefix) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	conn, err := rtnetlink.Dial(nil)
+	if err != nil {
+		return fmt.Errorf("tun: netlink: %w", err)
+	}
+	defer conn.Close()
+	want := map[netip.Prefix]bool{}
+	for _, p := range prefixes {
+		want[p.Masked()] = true
+	}
+	var errs []error
+	for p := range want {
+		if r.thrown[p] {
+			continue
+		}
+		if err := conn.Route.Replace(throwMsg(p)); err != nil {
+			if !p.Addr().Is4() && noIPv6(err) {
+				continue
+			}
+			errs = append(errs, fmt.Errorf("tun: exclude %s: %w", p, err))
+			continue
+		}
+		r.thrown[p] = true
+	}
+	for p := range r.thrown {
+		if !want[p] {
+			conn.Route.Delete(throwMsg(p))
+			delete(r.thrown, p)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func throwMsg(p netip.Prefix) *rtnetlink.RouteMessage {
+	fam := uint8(unix.AF_INET)
+	if !p.Addr().Is4() {
+		fam = unix.AF_INET6
+	}
+	return &rtnetlink.RouteMessage{Family: fam, DstLength: uint8(p.Bits()), Table: unix.RT_TABLE_UNSPEC, Protocol: unix.RTPROT_BOOT,
+		Scope: unix.RT_SCOPE_UNIVERSE, Type: unix.RTN_THROW,
+		Attributes: rtnetlink.RouteAttributes{Dst: net.IP(p.Addr().AsSlice()), Table: RouteTable}}
+}
+
+// Close reverts system DNS, removes the throw routes and the policy
+// rules. The device's routes go with the device.
 func (r *Router) Close() error {
 	r.revertDNS()
+	r.SetExcludes(nil)
 	return rules(false)
 }
 
