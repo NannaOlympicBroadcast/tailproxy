@@ -10,8 +10,10 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -76,8 +78,8 @@ func setupCapture(cfg *config.Config, rules func() *rule.Engine, router *proxy.R
 	case !tunMode && !capture.Supported:
 		return nil, errors.New("capture.mode tproxy is only supported on Linux; use capture.socks_listen on this system")
 	}
-	if os.Geteuid() != 0 {
-		return nil, fmt.Errorf("capture.mode %s needs root (network device, routes and policy rules); run as root or use capture.socks_listen", cfg.Capture.Mode)
+	if !isAdmin() {
+		return nil, fmt.Errorf("capture.mode %s needs root / administrator (network device, routes and policy rules); run as root or use capture.socks_listen", cfg.Capture.Mode)
 	}
 	c := &captureRuntime{rules: rules}
 	defer func() {
@@ -109,8 +111,15 @@ func setupCapture(cfg *config.Config, rules func() *rule.Engine, router *proxy.R
 	if err != nil {
 		return nil, err
 	}
-	bypass := net.Dialer{Control: capture.BypassControl}
-	router.Direct = net.Dialer{Control: capture.BypassControl, Resolver: dnsserver.Resolver(upstreams, &bypass)}
+	// tailproxy's own direct dials and upstream DNS must not be captured
+	// again: marked on Linux; bound to the physical interface on macOS and
+	// Windows (TUN mode).
+	control := capture.BypassControl
+	if tunMode {
+		control = tunstack.BypassControl
+	}
+	bypass := net.Dialer{Control: control}
+	router.Direct = net.Dialer{Control: control, Resolver: dnsserver.Resolver(upstreams, &bypass)}
 	router.UnknownDomain = cfg.DNS.UnknownDomain
 
 	c.dns = &dnsserver.Server{Pool: c.pool, Rules: rules, Upstreams: upstreams, Canary: cfg.DNS.AntiBypass.CanaryOn(), Dialer: bypass, Logf: log.Printf}
@@ -172,15 +181,25 @@ func setupCapture(cfg *config.Config, rules func() *rule.Engine, router *proxy.R
 		tunstack.Cleanup() // policy rules left by a crash
 		addr, _ := netip.ParsePrefix(cfg.Capture.TUNAddress)
 		c.tunName, c.tunDNS = cfg.Capture.TUNName, cfg.Capture.TUNDNSAddr()
+		if runtime.GOOS == "darwin" && !strings.HasPrefix(c.tunName, "utun") {
+			c.tunName = "utun" // macOS only has utunN devices; the kernel picks N
+		}
 		dev, err := tun.CreateTUN(c.tunName, 1500)
 		if err != nil {
-			return nil, fmt.Errorf("capture: create TUN device %s: %w", c.tunName, err)
+			hint := ""
+			if runtime.GOOS == "windows" {
+				hint = "（Windows 需要把 wintun.dll 放在 tailproxy.exe 同一目录，见 https://www.wintun.net）"
+			}
+			return nil, fmt.Errorf("capture: create TUN device %s: %w%s", c.tunName, err, hint)
+		}
+		if n, err := dev.Name(); err == nil {
+			c.tunName = n
 		}
 		if c.tun, err = tunstack.New(dev, tunstack.Options{DNSAddr: c.tunDNS, DNS: c.dns, RejectUDP: !udpProxy, Logf: log.Printf}); err != nil {
 			dev.Close()
 			return nil, err
 		}
-		if c.tunRouter, err = tunstack.NewRouter(c.tunName, addr); err != nil {
+		if c.tunRouter, err = tunstack.NewRouter(dev, addr); err != nil {
 			return nil, err
 		}
 		c.in.Name = "tun"

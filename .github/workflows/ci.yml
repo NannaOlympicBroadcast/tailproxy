@@ -80,6 +80,20 @@ jobs:
           $global:LASTEXITCODE = 0
           Stop-Process -Id $p.Id -Force
 
+      - name: TUN integration (Wintun, administrator)
+        shell: pwsh
+        run: |
+          # Wintun from its official site; the hash pins the build the test was written against.
+          Invoke-WebRequest -Uri https://www.wintun.net/builds/wintun-0.14.1.zip -OutFile wintun.zip
+          $h = (Get-FileHash wintun.zip -Algorithm SHA256).Hash.ToLower()
+          if ($h -ne '07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51') { throw "wintun.zip SHA-256 $h" }
+          Expand-Archive wintun.zip -DestinationPath wintun
+          go test -c -o tunstack.test.exe ./internal/tunstack/
+          Copy-Item wintun\wintun\bin\amd64\wintun.dll .
+          $env:TP_TUN_INTEGRATION = "1"
+          .\tunstack.test.exe -test.run TestTUNIntegration -test.v
+          if ($LASTEXITCODE -ne 0) { throw "TUN integration failed" }
+
   macos:
     runs-on: macos-latest
     steps:
@@ -106,3 +120,7 @@ jobs:
           ./tpctl --state-dir "$PWD/st" status
           ./tp stop --state-dir "$PWD/st"
           test -n "$state"
+      - name: TUN integration (utun, root)
+        run: |
+          go test -c -o tunstack.test ./internal/tunstack/
+          sudo TP_TUN_INTEGRATION=1 ./tunstack.test -test.run TestTUNIntegration -test.v

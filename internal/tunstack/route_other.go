@@ -1,25 +1,26 @@
-//go:build !linux
+//go:build !linux && !darwin && !windows
 
 package tunstack
 
 import (
 	"errors"
 	"net/netip"
+
+	"github.com/tailscale/wireguard-go/tun"
 )
 
 // Supported reports whether TUN capture can be set up on this system.
-// macOS and Windows need their own route and DNS setup (not written yet).
 const Supported = false
 
-var errUnsupported = errors.New("tun: capture.mode tun is only implemented on Linux so far")
+var errUnsupported = errors.New("tun: capture.mode tun is implemented on Linux, macOS and Windows only")
 
-// Router is Linux-only for now.
+// Router is not available here.
 type Router struct{}
 
-// NewRouter is Linux-only for now.
-func NewRouter(name string, addr netip.Prefix) (*Router, error) { return nil, errUnsupported }
+// NewRouter is not available here.
+func NewRouter(dev tun.Device, addr netip.Prefix) (*Router, error) { return nil, errUnsupported }
 
-// SetRoutes is Linux-only for now.
+// SetRoutes is not available here.
 func (r *Router) SetRoutes(routes []netip.Prefix) error { return errUnsupported }
 
 // Close is a no-op.

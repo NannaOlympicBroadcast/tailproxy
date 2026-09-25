@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/jsimonetti/rtnetlink"
+	"github.com/tailscale/wireguard-go/tun"
 	"golang.org/x/sys/unix"
 )
 
@@ -39,7 +40,11 @@ const Supported = true
 
 // NewRouter brings the device up with addr (e.g. 172.19.0.1/30) and adds
 // the policy rules. Call Close to remove them.
-func NewRouter(name string, addr netip.Prefix) (*Router, error) {
+func NewRouter(dev tun.Device, addr netip.Prefix) (*Router, error) {
+	name, err := dev.Name()
+	if err != nil {
+		return nil, err
+	}
 	conn, err := rtnetlink.Dial(nil)
 	if err != nil {
 		return nil, fmt.Errorf("tun: netlink: %w", err)
