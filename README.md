@@ -407,7 +407,11 @@ tailproxy 本身已经带着一个登录好的 Tailscale 节点（主节点）�
 - 默认只监听 `127.0.0.1:7708`，并且只接受回环地址的 `Host` 头，用来防御 DNS 重绑定攻击。
 - 所有写操作（保存规则、重新加载配置）都会拒绝跨站请求（检查 `Origin` 和 `Sec-Fetch-Site`），防止你浏览器里打开的其他网页偷偷改规则；保存规则还要求 `Content-Type: application/json`。
 - `panel.listen` 可以设为局域网地址，访问同样需要令牌；这时不再校验 `Host` 头。
-- `panel.tailnet`（只对 tailnet 开放面板）依赖 `ts` 槽位，尚未实现；设置后启动时会打印警告，面板仍只监听 `panel.listen`。
+- `panel.tailnet: true`：主节点接入 tailnet 后，面板和 API 同时监听主节点 tailnet 地址上与 `panel.listen` 相同的端口（例如 `http://100.x.y.z:7708`，或 MagicDNS 名 `http://tailproxy.<tailnet>.ts.net:7708`）。
+  - 仍然需要令牌（`tailproxy token` 查看）；谁能连上这个端口由 Tailscale ACL 决定。
+  - 该监听只接受 Tailscale 地址（100.64.0.0/10、fd7a:115c:a1e0::/48）、`*.ts.net` 名和短 MagicDNS 名作为 Host，防 DNS 重绑定；本机 `panel.listen` 仍只接受回环 Host。
+  - 主节点重新登录或重启时自动重新监听；面板「组件」里的 panel 一行显示 tailnet 地址。修改该项需要重启 tailproxy。
+  - 验证情况：监听 / 重新监听逻辑和 Host 检查有单元测试（用本地监听代替 tsnet），尚未在真实 tailnet 上验证。
 
 ## 测试
 

@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -227,9 +228,6 @@ func cmdRun(args []string) (err error) {
 	if err != nil {
 		return err
 	}
-	if p.TailnetRequested() {
-		log.Printf("tailproxy: warning: panel.tailnet is not implemented yet (needs the ts egress slot); the panel only listens on %s", p.Addr())
-	}
 	ln, err := p.Listen()
 	if err != nil {
 		return err
@@ -322,6 +320,18 @@ func cmdRun(args []string) (err error) {
 	}
 	if rt.capture != nil {
 		go rt.capture.Serve(ctx)
+	}
+	if p.TailnetRequested() {
+		// Same port as panel.listen, on the main node's tailnet addresses.
+		_, portStr, _ := net.SplitHostPort(ln.Addr().String())
+		port, _ := strconv.Atoi(portStr)
+		log.Printf("tailproxy: panel.tailnet: the panel will also listen on the main node's tailnet address, port %d, once it is connected", port)
+		go mgr.ServeTailnet(ctx, uint16(port), func(tl net.Listener) {
+			log.Printf("tailproxy: panel on the tailnet: http://%s", tl.Addr())
+			if err := p.ServeTailnet(ctx, tl); err != nil {
+				log.Printf("tailproxy: panel on the tailnet: %v", err)
+			}
+		})
 	}
 	if socksLn != nil {
 		socks := &proxy.SOCKS{Router: router, Logf: log.Printf}

@@ -68,7 +68,7 @@ var fields = map[string]meta{
 	"capture.dns_listen":             {desc: "DNS 前端监听地址；非回环地址时同时劫持局域网 DNS", def: "127.0.0.1:1053"},
 	"panel":                          {desc: "Web 面板与 REST API"},
 	"panel.listen":                   {desc: "监听地址", def: "127.0.0.1:7708"},
-	"panel.tailnet":                  {desc: "只对 tailnet 开放面板（未实现）"},
+	"panel.tailnet":                  {desc: "同时在主节点 tailnet 地址上开放面板（与 panel.listen 同端口，仍需令牌，受 Tailscale ACL 控制；修改需重启）"},
 	"panel.auth_token_env":           {desc: "面板令牌的环境变量名；不设置时令牌持久化在状态目录"},
 	"wireguard_ports":                {desc: "tsnet WireGuard 端口范围（保留）"},
 	"rules":                          {desc: "规则，按顺序首条命中；未命中时 direct。同一条规则内域名类条件与 ip_cidr 为「或」，port 为「且」。"},

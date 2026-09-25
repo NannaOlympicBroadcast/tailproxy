@@ -73,6 +73,8 @@ type Server struct {
 	runtime      Runtime
 
 	bound atomic.Pointer[string] // actual listen address once Listen succeeded
+	// tailnetAddr is the tailnet listener's address while ServeTailnet runs.
+	tailnetAddr atomic.Pointer[string]
 
 	mu     sync.RWMutex
 	cfg    *config.Config
@@ -179,12 +181,37 @@ func (s *Server) Addr() string {
 	return s.cfg.Panel.Listen
 }
 
-// TailnetRequested reports whether panel.tailnet is set. Serving the panel on
-// the tailnet needs the ts egress slot, which this build does not have yet.
+// TailnetRequested reports whether panel.tailnet is set: the panel is also
+// served on the main node's tailnet address (ServeTailnet), same port.
 func (s *Server) TailnetRequested() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.cfg.Panel.Tailnet
+}
+
+// TailnetAddr is where the panel is served on the tailnet ("" if not).
+func (s *Server) TailnetAddr() string {
+	if a := s.tailnetAddr.Load(); a != nil {
+		return *a
+	}
+	return ""
+}
+
+// ServeTailnet serves the panel on ln, a listener on the tailnet, until ln
+// is closed or ctx is cancelled. The token is required as on panel.listen;
+// Host headers must name this node on the tailnet (a Tailscale address, a
+// *.ts.net name or a short MagicDNS name) instead of loopback.
+func (s *Server) ServeTailnet(ctx context.Context, ln net.Listener) error {
+	addr := ln.Addr().String()
+	s.tailnetAddr.Store(&addr)
+	defer s.tailnetAddr.CompareAndSwap(&addr, nil)
+	srv := &http.Server{Handler: s.handler(true), ReadHeaderTimeout: 10 * time.Second}
+	stop := context.AfterFunc(ctx, func() { srv.Close() })
+	defer stop()
+	if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) && ctx.Err() == nil {
+		return err
+	}
+	return nil
 }
 
 // ListenAndServe serves the panel until ctx is cancelled.
@@ -223,8 +250,10 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	return nil
 }
 
-// Handler returns the panel's HTTP handler.
-func (s *Server) Handler() http.Handler {
+// Handler returns the panel's HTTP handler (for panel.listen).
+func (s *Server) Handler() http.Handler { return s.handler(false) }
+
+func (s *Server) handler(tailnet bool) http.Handler {
 	static, _ := fs.Sub(staticFS, "static")
 	mux := http.NewServeMux()
 	mux.Handle("GET /", http.FileServerFS(static))
@@ -242,18 +271,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/v1/rules", s.auth(s.handleRulesPut))
 	mux.HandleFunc("POST /api/v1/rules/test", s.auth(s.handleRuleTest))
 	mux.HandleFunc("GET /metrics", s.auth(s.handleMetrics))
-	return s.hostGuard(mux)
+	return s.hostGuard(mux, tailnet)
 }
 
 // hostGuard blocks DNS-rebinding attacks against a loopback-only panel by
-// only accepting loopback Host headers (defense in depth on top of the token).
-func (s *Server) hostGuard(next http.Handler) http.Handler {
+// only accepting loopback Host headers, and on the tailnet listener only
+// tailnet Host headers (defense in depth on top of the token).
+func (s *Server) hostGuard(next http.Handler, tailnet bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.requests.Add(1)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		if s.loopback && !isLoopbackHost(r.Host) {
+		if (tailnet && !isTailnetHost(r.Host)) || (!tailnet && s.loopback && !isLoopbackHost(r.Host)) {
 			http.Error(w, "forbidden host", http.StatusForbidden)
 			return
 		}
@@ -309,8 +339,14 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) components() []Component {
+	panel := Component{Name: "panel", State: "running"}
+	if a := s.TailnetAddr(); a != "" {
+		panel.Detail = "tailnet：http://" + a
+	} else if s.TailnetRequested() {
+		panel.Detail = "tailnet：等待主节点接入 tailnet"
+	}
 	out := []Component{
-		{Name: "panel", State: "running"},
+		panel,
 		{Name: "config", State: "loaded"},
 		{Name: "rule_engine", State: "ready"},
 	}
@@ -615,6 +651,32 @@ func isLoopbackListen(addr string) (bool, error) {
 		return false, nil // hostname or empty (all interfaces): treat as exposed
 	}
 	return ip.IsLoopback(), nil
+}
+
+// Tailscale assigns node addresses from these ranges.
+var tailnetPrefixes = []netip.Prefix{netip.MustParsePrefix("100.64.0.0/10"), netip.MustParsePrefix("fd7a:115c:a1e0::/48")}
+
+// isTailnetHost accepts Host headers naming a node on the tailnet: a
+// Tailscale address, a MagicDNS name (*.ts.net) or a short MagicDNS name.
+func isTailnetHost(hostport string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.ToLower(strings.Trim(host, "[]")), ".")
+	if ip, err := netip.ParseAddr(host); err == nil {
+		ip = ip.Unmap()
+		for _, p := range tailnetPrefixes {
+			if p.Contains(ip) {
+				return true
+			}
+		}
+		return false
+	}
+	if host == "" || host == "localhost" {
+		return false
+	}
+	return strings.HasSuffix(host, ".ts.net") || !strings.Contains(host, ".")
 }
 
 func isLoopbackHost(hostport string) bool {
