@@ -96,8 +96,17 @@ func TestCaptureConfig(t *testing.T) {
 	if c.Capture.TProxyPort != DefaultTProxyPort || c.Capture.DNSListen != DefaultDNSListen || c.Capture.Scope != "selective" || c.DNS.Mode != "fakeip" {
 		t.Fatalf("defaults: %+v %+v", c.Capture, c.DNS.Mode)
 	}
+	tunCfg, err := Parse([]byte("capture: {mode: tun}\nrules: []\n"))
+	if err != nil {
+		t.Fatalf("mode tun: %v", err)
+	}
+	if tunCfg.Capture.TUNName != DefaultTUNName || tunCfg.Capture.TUNDNSAddr().String() != "172.19.0.2" || tunCfg.Capture.Scope != "selective" {
+		t.Fatalf("tun defaults: %+v dns %s", tunCfg.Capture, tunCfg.Capture.TUNDNSAddr())
+	}
 	for _, bad := range []string{
-		"capture: {mode: tun}\nrules: []\n",
+		"capture: {mode: tun, scope: all}\nrules: []\n",
+		"capture: {mode: tun, tun_address: 172.19.0.1/31}\nrules: []\n",
+		"capture: {mode: tun, tun_address: 'fd00::1/64'}\nrules: []\n",
 		"capture: {mode: magic}\nrules: []\n",
 		"capture: {mode: tproxy, scope: some}\nrules: []\n",
 		"capture: {mode: tproxy, udp: always}\nrules: []\n",

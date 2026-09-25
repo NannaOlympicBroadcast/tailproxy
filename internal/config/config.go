@@ -154,7 +154,7 @@ const (
 	CaptureAuto   = "auto"   // currently: SOCKS5 inbound only, no system changes
 	CaptureSOCKS  = "socks"  // SOCKS5 inbound only
 	CaptureTProxy = "tproxy" // Linux nftables TPROXY + DNS front end
-	CaptureTUN    = "tun"    // not implemented yet
+	CaptureTUN    = "tun"    // TUN device + userspace stack (Linux so far)
 )
 
 type Capture struct {
@@ -171,6 +171,10 @@ type Capture struct {
 	// clients fall back to TCP) or "proxy" (UDP is routed like TCP;
 	// relay egresses cannot carry it).
 	UDP string `yaml:"udp,omitempty" json:"udp,omitempty"`
+	// TUN mode: device name and its address; the next address in the
+	// subnet answers DNS (default tailproxy0, 172.19.0.1/30 -> 172.19.0.2).
+	TUNName    string `yaml:"tun_name,omitempty" json:"tun_name,omitempty"`
+	TUNAddress string `yaml:"tun_address,omitempty" json:"tun_address,omitempty"`
 }
 
 // UDP modes (capture.udp).
@@ -248,6 +252,17 @@ func (c *Config) applyDefaults() {
 			c.Capture.Scope = "selective"
 		}
 	}
+	if c.Capture.Mode == CaptureTUN {
+		if c.Capture.TUNName == "" {
+			c.Capture.TUNName = DefaultTUNName
+		}
+		if c.Capture.TUNAddress == "" {
+			c.Capture.TUNAddress = DefaultTUNAddress
+		}
+		if c.Capture.Scope == "" {
+			c.Capture.Scope = "selective"
+		}
+	}
 	if c.DNS.Mode == "" {
 		c.DNS.Mode = "fakeip"
 	}
@@ -257,7 +272,19 @@ func (c *Config) applyDefaults() {
 const (
 	DefaultTProxyPort = 7893
 	DefaultDNSListen  = "127.0.0.1:1053"
+	DefaultTUNName    = "tailproxy0"
+	DefaultTUNAddress = "172.19.0.1/30"
 )
+
+// TUNDNSAddr is the address the TUN stack answers DNS on: the one after
+// capture.tun_address.
+func (c *Capture) TUNDNSAddr() netip.Addr {
+	p, err := netip.ParsePrefix(c.TUNAddress)
+	if err != nil {
+		return netip.Addr{}
+	}
+	return p.Addr().Next()
+}
 
 // Validate checks cross-references between egress entries and rules.
 func (c *Config) Validate() error {
@@ -390,7 +417,18 @@ func (c *Config) validateCapture(egressNames map[string]bool) []error {
 	switch c.Capture.Mode {
 	case "", CaptureAuto, CaptureSOCKS, CaptureTProxy:
 	case CaptureTUN:
-		errs = append(errs, errors.New("capture.mode: tun is not implemented yet; use tproxy (Linux) or socks"))
+		if c.Capture.Scope == "all" {
+			errs = append(errs, errors.New("capture.scope: all is not supported with capture.mode tun yet (only selective)"))
+		}
+		if c.Capture.TUNAddress != "" {
+			p, err := netip.ParsePrefix(c.Capture.TUNAddress)
+			switch {
+			case err != nil:
+				errs = append(errs, fmt.Errorf("capture.tun_address: %w", err))
+			case !p.Addr().Is4() || p.Bits() > 30:
+				errs = append(errs, fmt.Errorf("capture.tun_address %s: want an IPv4 prefix of /30 or larger (the next address answers DNS)", c.Capture.TUNAddress))
+			}
+		}
 	default:
 		errs = append(errs, fmt.Errorf("capture.mode %q: want auto, socks, tproxy or tun", c.Capture.Mode))
 	}

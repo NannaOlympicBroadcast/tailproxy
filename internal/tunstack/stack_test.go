@@ -86,8 +86,15 @@ func (d *hostDevice) Read(bufs [][]byte, sizes []int, off int) (int, error) {
 	sizes[0] = n - off
 	return 1, nil
 }
+
+// sniffWrites, if set, sees every packet the stack sends to the client.
+var sniffWrites func([]byte)
+
 func (d *hostDevice) Write(bufs [][]byte, off int) (int, error) {
 	for _, b := range bufs {
+		if sniffWrites != nil {
+			sniffWrites(append([]byte(nil), b[off:]...))
+		}
 		pb := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(append([]byte(nil), b[off:]...))})
 		d.h.ep.InjectInbound(header.IPv4ProtocolNumber, pb)
 		pb.DecRef()
@@ -253,5 +260,53 @@ func TestStack(t *testing.T) {
 			t.Fatalf("%d UDP flows still open", n)
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// capture.udp: block — the stack answers UDP with ICMP port unreachable
+// from the original destination (an OS then fails the client's socket with
+// ECONNREFUSED at once), but in-stack DNS still answers.
+func TestStackRejectUDP(t *testing.T) {
+	icmp := make(chan []byte, 4)
+	sniffWrites = func(p []byte) {
+		if len(p) >= 28 && p[9] == 1 { // IPv4 + ICMP
+			icmp <- p
+		}
+	}
+	defer func() { sniffWrites = nil }()
+	client := newClientHost(t)
+	s, err := New(client.device(), Options{DNSAddr: netip.MustParseAddr("172.19.0.2"), DNS: fakeDNS{}, RejectUDP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	uc, err := client.dialUDP("198.18.0.6:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer uc.Close()
+	uc.Write([]byte("quic"))
+	select {
+	case p := <-icmp:
+		ihl := int(p[0]&0x0f) * 4
+		src := netip.AddrFrom4([4]byte(p[12:16]))
+		if typ, code := p[ihl], p[ihl+1]; typ != 3 || code != 3 || src.String() != "198.18.0.6" {
+			t.Fatalf("ICMP type %d code %d from %s, want port unreachable from 198.18.0.6", typ, code, src)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no ICMP port unreachable")
+	}
+
+	q := dnsmessage.Message{Header: dnsmessage.Header{ID: 1}, Questions: []dnsmessage.Question{{Name: dnsmessage.MustNewName("a.example."), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET}}}
+	qb, _ := q.Pack()
+	dc, err := client.dialUDP("172.19.0.2:53")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dc.Close()
+	dc.Write(qb)
+	dc.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := dc.Read(make([]byte, 512)); err != nil {
+		t.Fatalf("DNS with RejectUDP: %v", err)
 	}
 }

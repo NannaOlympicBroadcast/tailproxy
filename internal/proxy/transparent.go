@@ -20,6 +20,8 @@ const DefaultSniffTimeout = 300 * time.Millisecond
 // Transparent is the inbound for connections diverted by TPROXY: the
 // listener's LocalAddr is the original destination.
 type Transparent struct {
+	// Name labels its connections ("tproxy" when empty; "tun").
+	Name   string
 	Router *Router
 	// Pool maps FakeIPs back to names; nil in real-IP DNS mode.
 	Pool         *fakeip.Pool
@@ -87,7 +89,7 @@ func (t *Transparent) handle(ctx context.Context, client net.Conn) {
 		if !ok {
 			// The client cached a FakeIP whose mapping is gone (recycled,
 			// or the table was lost). Guessing would misroute it.
-			c := &Conn{Inbound: "tproxy", Source: source, Host: ip.String(), Port: dst.Port(), RuleIndex: -1, Target: "reject",
+			c := &Conn{Inbound: t.inbound(), Source: source, Host: ip.String(), Port: dst.Port(), RuleIndex: -1, Target: "reject",
 				Reason: "unknown FakeIP"}
 			t.Router.Tracker.add(c)
 			t.Router.Tracker.finish(c, "FakeIP "+ip.String()+" has no name (mapping lost or recycled); the client will re-resolve")
@@ -123,7 +125,7 @@ func (t *Transparent) handle(ctx context.Context, client net.Conn) {
 
 	t.Router.Tracker.bypass.observe(d)
 	if d.Domain != "" && t.BlockDomain != nil && t.BlockDomain(d.Domain) {
-		c := &Conn{Inbound: "tproxy", Source: source, Host: d.Domain, Port: d.Port, DomainSrc: d.DomainSrc, ECH: d.ECH, OuterSNI: d.OuterSNI,
+		c := &Conn{Inbound: t.inbound(), Source: source, Host: d.Domain, Port: d.Port, DomainSrc: d.DomainSrc, ECH: d.ECH, OuterSNI: d.OuterSNI,
 			RuleIndex: -1, Target: "reject", Reason: "DoH endpoint (dns.anti_bypass.block_doh)"}
 		if d.IP.IsValid() {
 			c.DestIP = d.IP.String()
@@ -134,11 +136,18 @@ func (t *Transparent) handle(ctx context.Context, client net.Conn) {
 		in.Close()
 		return
 	}
-	target, c, err := t.Router.ConnectDest(ctx, "tproxy", source, d)
+	target, c, err := t.Router.ConnectDest(ctx, t.inbound(), source, d)
 	if err != nil {
 		in.Close()
 		t.logf("tproxy: %s: %v", describe(c), err)
 		return
 	}
 	t.Router.Relay(in, target, c)
+}
+
+func (t *Transparent) inbound() string {
+	if t.Name != "" {
+		return t.Name
+	}
+	return "tproxy"
 }

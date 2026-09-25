@@ -254,7 +254,7 @@ func cmdRun(args []string) (err error) {
 		defer socksLn.Close()
 		rt.socksAddr = socksLn.Addr().String()
 	}
-	if cfg.Capture.Mode == config.CaptureTProxy {
+	if cfg.Capture.Mode == config.CaptureTProxy || cfg.Capture.Mode == config.CaptureTUN {
 		capt, err := setupCapture(cfg, p.Engine, router, f.paths.Dir)
 		if err != nil {
 			return err

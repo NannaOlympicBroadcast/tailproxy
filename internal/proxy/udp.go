@@ -46,6 +46,8 @@ const (
 // the client's Initial packets) names the flow, then a learned name; with
 // none of them only IP rules apply.
 type TransparentUDP struct {
+	// Name labels its flows ("tproxy" when empty; "tun").
+	Name   string
 	Router *Router
 	// Pool maps FakeIPs back to names; nil in real-IP DNS mode.
 	Pool *fakeip.Pool
@@ -289,7 +291,7 @@ func (t *TransparentUDP) setup(ctx context.Context, f *udpFlow) error {
 	if t.Pool != nil && t.Pool.Contains(ip) {
 		name, ok := t.Pool.Lookup(ip)
 		if !ok {
-			c := &Conn{Inbound: "tproxy", Network: "udp", Source: source, Host: ip.String(), Port: orig.Port(), RuleIndex: -1,
+			c := &Conn{Inbound: t.inbound(), Network: "udp", Source: source, Host: ip.String(), Port: orig.Port(), RuleIndex: -1,
 				Target: "reject", Reason: "unknown FakeIP"}
 			t.Router.Tracker.add(c)
 			t.Router.Tracker.finish(c, "FakeIP "+ip.String()+" has no name (mapping lost or recycled); the client will re-resolve")
@@ -314,7 +316,7 @@ func (t *TransparentUDP) setup(ctx context.Context, f *udpFlow) error {
 	}
 	t.Router.Tracker.bypass.observe(d)
 	if d.Domain != "" && t.BlockDomain != nil && t.BlockDomain(d.Domain) {
-		c := &Conn{Inbound: "tproxy", Network: "udp", Source: source, Host: d.Domain, Port: d.Port, DomainSrc: d.DomainSrc, DestIP: ip.String(),
+		c := &Conn{Inbound: t.inbound(), Network: "udp", Source: source, Host: d.Domain, Port: d.Port, DomainSrc: d.DomainSrc, DestIP: ip.String(),
 			RuleIndex: -1, Target: "reject", Reason: "DoH endpoint (dns.anti_bypass.block_doh)"}
 		t.Router.Tracker.add(c)
 		t.Router.Tracker.bypass.dohBlocked.Add(1)
@@ -322,7 +324,7 @@ func (t *TransparentUDP) setup(ctx context.Context, f *udpFlow) error {
 		return errors.New("DoH endpoint")
 	}
 
-	up, c, err := t.Router.ConnectUDP(ctx, "tproxy", source, d)
+	up, c, err := t.Router.ConnectUDP(ctx, t.inbound(), source, d)
 	if err != nil {
 		t.logf("tproxy udp: %s: %v", describe(c), err)
 		return err
@@ -370,4 +372,11 @@ func (t *TransparentUDP) sniffQUIC(ctx context.Context, f *udpFlow) sniff.Result
 			return sniff.Result{}
 		}
 	}
+}
+
+func (t *TransparentUDP) inbound() string {
+	if t.Name != "" {
+		return t.Name
+	}
+	return "tproxy"
 }

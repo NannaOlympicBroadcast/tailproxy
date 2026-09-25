@@ -24,6 +24,10 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq nftables
           go test -c -o capture.test ./internal/capture/
           sudo ./capture.test -test.run TestTProxyIntegration -test.v
+      - name: TUN integration (network namespace, real TUN device)
+        run: |
+          go test -c -o tunstack.test ./internal/tunstack/
+          sudo ./tunstack.test -test.run TestTUNIntegration -test.v
 
   windows:
     runs-on: windows-latest

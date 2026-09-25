@@ -18,7 +18,7 @@
 | Linux 透明捕获（`capture.mode: tproxy`）：nftables TPROXY + 策略路由、FakeIP / 分流 DNS、SNI / HTTP Host 嗅探、DNS 劫持、防回环 | 已实现；在网络命名空间里做了端到端集成测试，**尚未在真实路由器 / OpenWrt 上验证** |
 | `tpctl` 本机命令行：管理 tailproxy + 内置官方 tailscale 客户端（操作主节点）+ schema | 已实现；Linux / macOS 走 Unix 套接字，Windows 走命名管道（由 CI 在真实 Windows 上验证） |
 | UDP 代理（Linux 透明捕获，`capture.udp: proxy`）：按规则经出口节点 / 直连转发 UDP（如 QUIC） | 已实现；网络命名空间集成测试覆盖，**尚未在真实路由器和出口节点上验证**；中继出口不承载 UDP；SOCKS5 UDP ASSOCIATE 未实现 |
-| TUN（Windows / macOS / Android / iOS） | 未实现 |
+| TUN 模式（`capture.mode: tun`）：TUN 设备 + gVisor 用户态协议栈，路由 + 协议栈内 DNS | Linux 已实现并在网络命名空间里用真实 TUN 设备做了集成测试；**macOS / Windows / Android / iOS 的路由与系统 DNS 设置未实现**；只支持 selective 范围 |
 
 ## 启动与管理
 
@@ -276,6 +276,27 @@ dns:
 - **可见度统计（L0）**：面板「连接」页会统计透明捕获连接的域名来源（FakeIP / SNI / 未知）、带 ECH 的连接数和拦截的 DoH 次数，并列出「域名未知」最多的目的地，直接给出旁路影响有多大。
 
 防回环：Tailscale 在 Linux 上以 root 运行时，会给自己的套接字打 `SO_MARK 0x80000`（`tailscale.com/net/netns`），tsnet 同样如此。tailproxy 的直连和上游 DNS 查询也打这个标记，nft 规则会放过带这个标记的包，所以既不会回环，也不会把 tsnet 自己的 WireGuard 流量再抓回来。
+
+### TUN 模式（`capture.mode: tun`）
+
+不想用 nftables，或以后在 macOS / Windows 上使用时，TUN 模式用一块虚拟网卡加用户态 TCP/IP 协议栈（gVisor netstack）接管流量，规则、FakeIP、SNI / QUIC 嗅探、出口都和 TPROXY 一样：
+
+```yaml
+capture:
+  mode: tun
+  tun_name: tailproxy0        # 默认
+  tun_address: 172.19.0.1/30  # 默认；172.19.0.2 是协议栈内的 DNS
+  udp: proxy                  # 或 block（默认：UDP 立即回 ICMP 不可达）
+dns:
+  mode: fakeip
+```
+
+- 目前只在 Linux 上实现（root）。tailproxy 创建设备，把 FakeIP 地址池、规则里的 `ip_cidr`、学到的地址和 DNS 地址路由进设备（独立路由表 7894，策略规则优先级 9895）；带绕行标记的包（tailproxy 自己的直连、上游 DNS，以及 tsnet）先查 main 表（优先级 9894），不会回环。只支持 selective 范围。
+- **系统 DNS 需要指向 `172.19.0.2`**（例如 systemd-resolved：`resolvectl dns tailproxy0 172.19.0.2; resolvectl domain tailproxy0 '~.'`）；tailproxy 目前不会自动修改系统 DNS。也可以另设 `capture.dns_listen` 让 DNS 同时监听主机地址。
+- DoH 封堵只有域名部分生效（DNS 和 SNI），按 IP 封堵依赖 nftables，只在 tproxy 模式下有。
+- 停止时设备和路由随之删除；`tailproxy capture down` 也会清理残留的策略规则。
+
+**验证情况**：`internal/tunstack` 的单元测试用第二个用户态协议栈当客户端（不需要 root，所有系统上都跑）；`TestTUNIntegration` 在网络命名空间里创建真实 TUN 设备，经设备做 DNS（得到 FakeIP）、HTTP 和 UDP 到出口；`udp: block` 时内核里的 UDP 套接字立即得到 ECONNREFUSED；并检查关闭后策略规则被删除。`tailproxy run` 的 TUN 模式在网络命名空间里手动跑通过（reject 规则、面板显示 TUN 入口）。还没有在真实桌面系统上验证。
 
 **崩溃恢复**：进程异常退出时，规则可能会残留，导致被捕获的流量没有去处。可以用 `sudo tailproxy capture down` 立即删除。systemd 服务已经加了 `ExecStopPost=-tailproxy capture down`，服务停止或崩溃时会自动清理；下次启动时也会先清掉残留。
 
