@@ -170,7 +170,7 @@
 | 走法 | 适用场景 | 机制 |
 |---|---|---|
 | **A. 根本不进入 tailproxy** | `capture.exclude_cidr` 中的网段；Linux 上 nft 不匹配的流量；iOS / 选择性路由模式下不在 `includedRoutes` 里的目的地 | 流量不经过任何代理代码，直接走系统路由表〔无来源·设计决策〕；iOS 以 `includedRoutes` 按目的 IP 接管的做法见 [来源 S27] |
-| **B. 被截获后，由 `direct` 出站重新拨号** | 需要先看到 SNI 才能判断规则的流量（全量 TUN / TPROXY 模式） | 重新拨号的套接字必须绕开自己的 TUN，否则会回环：Linux 打 `SO_MARK` 绕行标记，让它走 main 路由表 [来源 S15][来源 S16]；Android 调用 `VpnService.protect()`，受保护的套接字直接走底层网络，不经过 VPN [来源 S14]；macOS 透明代理对 flow 返回 `false`，让系统直连 [来源 S13]；Windows / macOS-utun 绑定物理网卡〔无来源·待验证〕 |
+| **B. 被截获后，由 `direct` 出站重新拨号** | 需要先看到 SNI 才能判断规则的流量（全量 TUN / TPROXY 模式） | 重新拨号的套接字必须绕开自己的 TUN，否则会回环：Linux 打 `SO_MARK` 绕行标记，让它走 main 路由表 [来源 S15][来源 S16]；Android 调用 `VpnService.protect()`，受保护的套接字直接走底层网络，不经过 VPN [来源 S14]；macOS 透明代理对 flow 返回 `false`，让系统直连 [来源 S13]；Windows / macOS-utun 绑定物理网卡（Windows `IP_UNICAST_IF`、macOS `IP_BOUND_IF`，已在 CI 集成测试中验证）〔无来源·实现验证〕 |
 
 **选择性路由模式（推荐的默认模式）**〔无来源·设计决策〕：DNS 模块只给**命中域名规则的域名**返回 FakeIP，其余域名返回真实 IP；TUN 或隧道只接管 FakeIP 地址池和 IP 规则中的网段。这样未命中的流量走的是 A 路径，完全不经过 tailproxy。代价有两个：域名规则只能在 DNS 阶段判定，拿不到 SNI 校验；应用如果自带 DoH，会绕过 DNS 规则。
 
@@ -332,7 +332,7 @@ rules:
 |---|---|---|
 | M0 PoC | 两个 tsnet 槽位加 SOCKS5 入口，支持 keyword/CIDR 规则 | 通过两个槽位访问 IP 回显服务，返回的是两个不同出口的公网 IP。**状态：已验收（2026-09-24）**：在真实 tailnet 上，同一客户端经中国、美国两个出口分别得到 106.52.30.242 和 186.244.245.39（出口节点和中继两种方式都验证过，见 README） |
 | M1 Linux | nft TPROXY、FakeIP DNS、SNI/HTTP 嗅探、回环防护、CLI | 路由器（OpenWrt）上透明分流，没有 DNS 泄漏。**状态**：TPROXY（selective / all）、策略路由（netlink）、FakeIP + 分流 DNS、DNS 劫持、canary、SNI/Host 嗅探、防回环、`capture down`、L2 DoH/DoT/DoQ 封堵、L3 ECH 剥离、L4 规则域名预解析与应答学习、L0 可见度统计都已实现，并在网络命名空间里做了集成测试；L4 的 `outer_sni` 规则已实现（外层 SNI 只由 `outer_sni` 匹配，不再当作域名）；UDP 代理已实现（`capture.udp: proxy`，经出口节点 / 直连，中继不承载 UDP；QUIC Initial SNI 嗅探支持 v1 / v2，跨数据报合并 ClientHello），在网络命名空间里做了集成测试；L5 浏览器策略尚未实现；验收项需要真实路由器，尚未完成 |
-| M2 桌面 | Windows Wintun、macOS utun、与系统 Tailscale 共存 | 官方客户端保持 tailnet 访问，tailproxy 负责出口分流。**状态**：TUN 引擎（`internal/tunstack`：gVisor netstack + wireguard-go `tun.Device`，TCP/UDP 交给与 TPROXY 相同的入口，协议栈内 DNS）已实现，跨平台编译；Linux 的路由（独立路由表 + 绕行标记优先查 main 表）和 `capture.mode: tun` 已接入，并在网络命名空间里用真实 TUN 设备测试；macOS utun / Windows Wintun 的路由与系统 DNS 设置、防回环（绑定物理网卡）尚未实现 |
+| M2 桌面 | Windows Wintun、macOS utun、与系统 Tailscale 共存 | 官方客户端保持 tailnet 访问，tailproxy 负责出口分流。**状态**：TUN 引擎（`internal/tunstack`：gVisor netstack + wireguard-go `tun.Device`，TCP/UDP 交给与 TPROXY 相同的入口，协议栈内 DNS）已实现，跨平台编译；`capture.mode: tun` 已在三个平台接入：Linux 用独立路由表 + 绕行标记优先查 main 表；macOS utun 用 ifconfig/route，防回环用 `IP_BOUND_IF` 绑定默认路由网卡；Windows Wintun 用 IP Helper API，防回环用 `IP_UNICAST_IF`。三个平台都在 CI 里用真实 TUN 设备跑通集成测试。尚未实现：自动设置系统 DNS、与系统 Tailscale 共存的实测、Windows 默认路由冲突（R5）回归 |
 | M3 移动 | Android VpnService、iOS NEPacketTunnelProvider（gomobile） | 单个 VPN 同时提供 tailnet 访问和多出口分流 |
 | M4 生态 | Rule Provider、出口组健康检查、指标、GUI | —。**已有**：`tpctl` 命令行（内置官方 tailscale CLI，操作 tailproxy 主节点，本机无需另装 tailscale；`tpctl schema` 输出配置 JSON Schema、OpenAPI、命令清单） |
 
