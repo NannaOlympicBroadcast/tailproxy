@@ -149,23 +149,32 @@ func (s *Server) serveTCP(ctx context.Context, ln net.Listener) {
 			}
 			return
 		}
-		go func() {
-			defer c.Close()
-			r := bufio.NewReader(c)
-			for {
-				c.SetDeadline(time.Now().Add(30 * time.Second))
-				q, err := readTCPMsg(r)
-				if err != nil {
-					return
-				}
-				resp := s.handle(ctx, q, true)
-				if resp == nil || writeTCPMsg(c, resp) != nil {
-					return
-				}
-			}
-		}()
+		go s.ServeConn(ctx, c)
 	}
 }
+
+// ServeConn answers DNS over one TCP connection (length-prefixed messages)
+// until the client closes it or is idle for 30 seconds; it closes c.
+func (s *Server) ServeConn(ctx context.Context, c net.Conn) {
+	defer c.Close()
+	r := bufio.NewReader(c)
+	for {
+		c.SetDeadline(time.Now().Add(30 * time.Second))
+		q, err := readTCPMsg(r)
+		if err != nil {
+			return
+		}
+		resp := s.handle(ctx, q, true)
+		if resp == nil || writeTCPMsg(c, resp) != nil {
+			return
+		}
+	}
+}
+
+// Answer returns the response to one DNS query received over UDP, or nil
+// to drop it. It is Serve's per-packet path, for front ends that deliver
+// packets themselves (the TUN stack).
+func (s *Server) Answer(ctx context.Context, q []byte) []byte { return s.handle(ctx, q, false) }
 
 func readTCPMsg(r io.Reader) ([]byte, error) {
 	var l [2]byte
