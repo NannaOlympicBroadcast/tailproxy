@@ -23,6 +23,12 @@ import (
 // started) egress manager for the given config.
 func startSOCKS(t *testing.T, cfgYAML string) (addr string, tr *Tracker) {
 	t.Helper()
+	return startSOCKSWith(t, cfgYAML, nil)
+}
+
+// startSOCKSWith is startSOCKS with a hook to adjust the router.
+func startSOCKSWith(t *testing.T, cfgYAML string, adjust func(*Router)) (addr string, tr *Tracker) {
+	t.Helper()
 	cfg, err := config.Parse([]byte(cfgYAML))
 	if err != nil {
 		t.Fatal(err)
@@ -37,6 +43,9 @@ func startSOCKS(t *testing.T, cfgYAML string) (addr string, tr *Tracker) {
 	}
 	tr = NewTracker()
 	r := &Router{Rules: func() *rule.Engine { return eng }, Egress: mgr, Tracker: tr}
+	if adjust != nil {
+		adjust(r)
+	}
 	ln, err := ListenSOCKS("127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

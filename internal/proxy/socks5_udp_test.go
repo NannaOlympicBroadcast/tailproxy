@@ -2,12 +2,15 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net"
 	"net/netip"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/net/dns/dnsmessage"
 
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/socks5"
 )
@@ -38,11 +41,13 @@ func udpAssociate(t *testing.T, socksAddr string) (net.Conn, netip.AddrPort) {
 
 func TestSOCKSUDPAssociate(t *testing.T) {
 	port := udpEcho(t).Port()
-	addr, tr := startSOCKS(t, `
+	// Names resolve to 127.0.0.1 only: "localhost" is ::1 first on some
+	// systems, and a UDP dial takes the first address.
+	addr, tr := startSOCKSWith(t, `
 rules:
   - {domain_keyword: [blocked], egress: reject}
   - {final: direct}
-`)
+`, func(r *Router) { r.Direct.Resolver = stubResolver(t, netip.MustParseAddr("127.0.0.1")) })
 	ctrl, relay := udpAssociate(t, addr)
 	if !relay.Addr().IsLoopback() {
 		t.Fatalf("relay address %s is not the listener's loopback address", relay)
@@ -76,8 +81,8 @@ rules:
 			t.Fatalf("via 127.0.0.1: %q %v", got, err)
 		}
 	}
-	if got, err := exchange("localhost", "three"); err != nil || got != "echo:three" {
-		t.Fatalf("via localhost: %q %v", got, err)
+	if got, err := exchange("echo.test", "three"); err != nil || got != "echo:three" {
+		t.Fatalf("via echo.test: %q %v", got, err)
 	}
 	// A rejected destination gets nothing back.
 	if got, err := exchange("blocked.example", "x"); err == nil {
@@ -116,6 +121,47 @@ rules:
 	if _, err := uc.Read(make([]byte, 64)); err == nil {
 		t.Fatal("relay still answers after the control connection closed")
 	}
+}
+
+// stubResolver answers every A query with ip and AAAA with no records.
+func stubResolver(t *testing.T, ip netip.Addr) *net.Resolver {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pc.Close() })
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			n, from, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			var p dnsmessage.Parser
+			h, err := p.Start(buf[:n])
+			if err != nil {
+				continue
+			}
+			q, err := p.Question()
+			if err != nil {
+				continue
+			}
+			b := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: h.ID, Response: true, RecursionAvailable: true})
+			b.StartQuestions()
+			b.Question(q)
+			b.StartAnswers()
+			if q.Type == dnsmessage.TypeA {
+				b.AResource(dnsmessage.ResourceHeader{Name: q.Name, Class: dnsmessage.ClassINET, TTL: 60}, dnsmessage.AResource{A: ip.As4()})
+			}
+			msg, _ := b.Finish()
+			pc.WriteTo(msg, from)
+		}
+	}()
+	return &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "udp", pc.LocalAddr().String())
+	}}
 }
 
 // Datagrams from another address than the client's are ignored.
