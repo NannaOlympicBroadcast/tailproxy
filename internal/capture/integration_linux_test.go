@@ -605,7 +605,7 @@ func netnsUDPTest(t *testing.T) {
 
 	engine, err := rule.Compile([]config.Rule{
 		{DomainSuffix: []string{"egress.test"}, Egress: "vps"},
-		{DomainSuffix: []string{"relay.test"}, Egress: "relay"},
+		{DomainSuffix: []string{"relay.test", "example.com"}, Egress: "relay"},
 		{IPCIDR: []string{"203.0.113.0/24"}, Egress: "vps"},
 	})
 	if err != nil {
@@ -703,6 +703,27 @@ func netnsUDPTest(t *testing.T) {
 	if err := exchange(netip.AddrPortFrom(netip.MustParseAddr("203.0.113.7"), uint16(port)), "cidr"); err != nil {
 		t.Fatalf("UDP via ip_cidr: %v", err)
 	}
+	// A QUIC Initial to a routed address: its SNI (example.com) wins over
+	// the ip_cidr rule, so the flow goes to the relay (no UDP) instead.
+	initial, err := os.ReadFile("../sniff/testdata/rfc9001-client-initial.hex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	quic := make([]byte, len(initial)/2)
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(initial)), "%x", &quic); err != nil {
+		t.Fatal(err)
+	}
+	qc, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.IPv4(203, 0, 113, 9), Port: port})
+	if err != nil {
+		t.Fatal(err)
+	}
+	qc.Write(quic)
+	qc.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	if _, err := qc.Read(make([]byte, 2048)); err == nil {
+		t.Error("QUIC to example.com went to the ip_cidr egress, not by its SNI")
+	}
+	qc.Close()
+
 	relay := lookup("x.relay.test")
 	if err := exchange(netip.AddrPortFrom(relay, uint16(port)), "r"); err == nil {
 		t.Fatal("UDP to a relay egress got a reply")
@@ -711,7 +732,7 @@ func netnsUDPTest(t *testing.T) {
 	eg.mu.Lock()
 	seen := strings.Join(eg.seen, ", ")
 	eg.mu.Unlock()
-	for _, want := range []string{"udp vps quic.egress.test", "udp vps 203.0.113.7", "udp relay x.relay.test"} {
+	for _, want := range []string{"udp vps quic.egress.test", "udp vps 203.0.113.7", "udp relay x.relay.test", "udp relay example.com"} {
 		if !strings.Contains(seen, want) {
 			t.Errorf("egress calls %q: missing %q", seen, want)
 		}
@@ -727,7 +748,7 @@ func netnsUDPTest(t *testing.T) {
 			t.Errorf("byte counts: %+v", v)
 		}
 	}
-	if flows != 3 {
-		t.Errorf("udp flows recorded: %d, want 3", flows)
+	if flows != 4 {
+		t.Errorf("udp flows recorded: %d, want 4", flows)
 	}
 }

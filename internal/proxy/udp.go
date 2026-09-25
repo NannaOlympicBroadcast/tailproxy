@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/fakeip"
+	"github.com/NannaOlympicBroadcast/tailproxy/internal/sniff"
 )
 
 // UDPListener is where diverted UDP arrives: each packet comes with the
@@ -32,20 +33,27 @@ const (
 	maxUDPFlows = 8192
 	// flowQueue is how many packets wait while a flow is being set up.
 	flowQueue = 32
+	// quicSniffWait bounds how long a flow's first datagrams are held to
+	// read a QUIC ClientHello; clients send all Initial datagrams at once.
+	quicSniffWait = 150 * time.Millisecond
 )
 
 // TransparentUDP is the inbound for UDP diverted by TPROXY. Packets are
 // grouped into flows by (client, original destination); the first packet
 // of a flow is routed like a TCP connection (FakeIP name, learned name or
 // address), and the flow keeps that route until it is idle for Timeout.
-// No payload is inspected: QUIC SNI sniffing is not implemented, so with
-// neither FakeIP nor a learned name only IP rules apply.
+// Without a FakeIP name, the server_name of a QUIC ClientHello (read from
+// the client's Initial packets) names the flow, then a learned name; with
+// none of them only IP rules apply.
 type TransparentUDP struct {
 	Router *Router
 	// Pool maps FakeIPs back to names; nil in real-IP DNS mode.
 	Pool *fakeip.Pool
 	// Learned maps a real address back to the name it was resolved for.
 	Learned func(netip.Addr) (string, bool)
+	// BlockDomain, if set, refuses flows to listed names (public DoH
+	// endpoints seen in a QUIC SNI, DESIGN §4.8 L2).
+	BlockDomain func(string) bool
 	// Reply opens the socket that talks to the client for one flow: bound
 	// to orig and connected to client (capture.DialUDPReply). Replies must
 	// come from orig, or the client drops them.
@@ -67,8 +75,10 @@ type udpFlow struct {
 	once sync.Once
 
 	// Set by setup and owned by run, which closes them; nil for a flow
-	// that could not be routed.
+	// that could not be routed. pending holds datagrams setup read while
+	// sniffing; run forwards them first.
 	up, down net.Conn
+	pending  [][]byte
 	c        *Conn
 }
 
@@ -166,6 +176,12 @@ func (t *TransparentUDP) run(ctx context.Context, f *udpFlow) {
 		}
 	}
 
+	for _, p := range f.pending {
+		if _, err := f.up.Write(p); err == nil {
+			f.c.up.Add(int64(len(p)))
+		}
+	}
+	f.pending = nil
 	var errOnce sync.Once
 	var firstErr error
 	fail := func(err error) {
@@ -282,13 +298,29 @@ func (t *TransparentUDP) setup(ctx context.Context, f *udpFlow) error {
 		d.Domain, d.DomainSrc = name, "fakeip"
 	} else {
 		d.IP = ip
-		if t.Learned != nil {
+		res := t.sniffQUIC(ctx, f)
+		d.ECH = res.ECH
+		switch {
+		case res.ECH:
+			d.OuterSNI = res.Host
+		case res.Host != "":
+			d.Domain, d.DomainSrc = res.Host, res.Protocol
+		}
+		if d.Domain == "" && t.Learned != nil {
 			if name, ok := t.Learned(ip); ok {
 				d.Domain, d.DomainSrc = name, "learned"
 			}
 		}
 	}
 	t.Router.Tracker.bypass.observe(d)
+	if d.Domain != "" && t.BlockDomain != nil && t.BlockDomain(d.Domain) {
+		c := &Conn{Inbound: "tproxy", Network: "udp", Source: source, Host: d.Domain, Port: d.Port, DomainSrc: d.DomainSrc, DestIP: ip.String(),
+			RuleIndex: -1, Target: "reject", Reason: "DoH endpoint (dns.anti_bypass.block_doh)"}
+		t.Router.Tracker.add(c)
+		t.Router.Tracker.bypass.dohBlocked.Add(1)
+		t.Router.Tracker.finish(c, "blocked: public DoH endpoint")
+		return errors.New("DoH endpoint")
+	}
 
 	up, c, err := t.Router.ConnectUDP(ctx, "tproxy", source, d)
 	if err != nil {
@@ -315,5 +347,27 @@ func (t *TransparentUDP) closeAll() {
 	t.mu.Unlock()
 	for _, f := range flows {
 		f.close()
+	}
+}
+
+// sniffQUIC holds the flow's first datagrams until they yield a QUIC
+// ClientHello, the flow turns out not to be QUIC, or quicSniffWait passes.
+// The datagrams are kept in f.pending.
+func (t *TransparentUDP) sniffQUIC(ctx context.Context, f *udpFlow) sniff.Result {
+	var q sniff.QUIC
+	timer := time.NewTimer(quicSniffWait)
+	defer timer.Stop()
+	for {
+		select {
+		case p := <-f.in:
+			f.pending = append(f.pending, p)
+			if res, done := q.Add(p); done {
+				return res
+			}
+		case <-timer.C:
+			return sniff.Result{}
+		case <-ctx.Done():
+			return sniff.Result{}
+		}
 	}
 }

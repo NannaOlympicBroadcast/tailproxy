@@ -145,7 +145,7 @@
 - **出口组**：`fallback`（健康检查失败时切换到下一个）和 `latency`（选延迟最低的）。
 - **每个槽位各自的 DNS**：命中某槽位的域名，通过该槽位的 `Dial` 访问 DoH（如 `https://1.1.1.1/dns-query`），保证解析结果和出口地理位置一致，也避免 DNS 泄漏。〔无来源·设计决策〕
 - **UDP**：每个槽位维护一张 NAT 表，超时参考 sing-box 默认的 5m [来源 S5]。可选择阻断 UDP/443（QUIC），迫使应用回落到 TCP，以便稳定拿到 SNI。〔无来源·设计决策〕
-  - **实现说明**：NAT 表放在捕获层而不是槽位里：每个「客户端 × 原目的地址」一条流，第一包按规则选出口（FakeIP 反查 / 学到的域名 / IP），出口节点用 tsnet 的 `Dial("udp")`（与 TCP 同一条 netstack 路径），空闲 5 分钟结束。回包用一个绑定到原目的地址（`IP_TRANSPARENT`）并 connect 到客户端的套接字发出，所以源地址正确；TPROXY 查找套接字时先找已连接的，同一条流后续的包可能直接送到这个套接字，两条路径都会转发。默认仍是阻断（`capture.udp: block`）。〔无来源·设计决策〕
+  - **实现说明**：NAT 表放在捕获层而不是槽位里：每个「客户端 × 原目的地址」一条流，第一包按规则选出口（FakeIP 反查 / QUIC Initial SNI / 学到的域名 / IP），出口节点用 tsnet 的 `Dial("udp")`（与 TCP 同一条 netstack 路径），空闲 5 分钟结束。回包用一个绑定到原目的地址（`IP_TRANSPARENT`）并 connect 到客户端的套接字发出，所以源地址正确；TPROXY 查找套接字时先找已连接的，同一条流后续的包可能直接送到这个套接字，两条路径都会转发。默认仍是阻断（`capture.udp: block`）。〔无来源·设计决策〕
 - **资源开销**：每个槽位都是一个完整的 gVisor 栈加一个 WireGuard 引擎。v1 限制槽位数量（例如 ≤8），并支持懒启动（首次命中时才连接）。〔无来源·设计决策〕
 - **中继出口（relay）**：因为一台设备只能用一个出口节点 [来源 S1]，「一个出口一台设备」是出口节点方案的固有成本。中继出口不用出口节点：出口机器上运行 `tailproxy relay`（SOCKS5 CONNECT + 用户名 / 密码认证 [来源 S48][来源 S49]），客户端经主节点的 `Dial` 连到它的 Tailscale 地址（普通 tailnet 流量，不需要 `autogroup:internet`），域名由中继在出口机器上解析。客户端只有主节点一台设备，出口机器也不需要 `--advertise-exit-node`。〔无来源·设计决策〕
   - 中继只监听 Tailscale 地址或回环地址，只接受 tailnet 或回环来源，必须带令牌；默认拒绝内网、回环、链路本地（含云元数据 169.254.169.254 [来源 S50]）和 tailnet 目的地址，`--allow-private` 才放开。〔无来源·设计决策〕
@@ -331,7 +331,7 @@ rules:
 | 阶段 | 内容 | 验收 |
 |---|---|---|
 | M0 PoC | 两个 tsnet 槽位加 SOCKS5 入口，支持 keyword/CIDR 规则 | 通过两个槽位访问 IP 回显服务，返回的是两个不同出口的公网 IP。**状态：已验收（2026-09-24）**：在真实 tailnet 上，同一客户端经中国、美国两个出口分别得到 106.52.30.242 和 186.244.245.39（出口节点和中继两种方式都验证过，见 README） |
-| M1 Linux | nft TPROXY、FakeIP DNS、SNI/HTTP 嗅探、回环防护、CLI | 路由器（OpenWrt）上透明分流，没有 DNS 泄漏。**状态**：TPROXY（selective / all）、策略路由（netlink）、FakeIP + 分流 DNS、DNS 劫持、canary、SNI/Host 嗅探、防回环、`capture down`、L2 DoH/DoT/DoQ 封堵、L3 ECH 剥离、L4 规则域名预解析与应答学习、L0 可见度统计都已实现，并在网络命名空间里做了集成测试；L4 的 `outer_sni` 规则已实现（外层 SNI 只由 `outer_sni` 匹配，不再当作域名）；UDP 代理已实现（`capture.udp: proxy`，经出口节点 / 直连，中继不承载 UDP，不做 QUIC SNI 嗅探），在网络命名空间里做了集成测试；L5 浏览器策略尚未实现；验收项需要真实路由器，尚未完成 |
+| M1 Linux | nft TPROXY、FakeIP DNS、SNI/HTTP 嗅探、回环防护、CLI | 路由器（OpenWrt）上透明分流，没有 DNS 泄漏。**状态**：TPROXY（selective / all）、策略路由（netlink）、FakeIP + 分流 DNS、DNS 劫持、canary、SNI/Host 嗅探、防回环、`capture down`、L2 DoH/DoT/DoQ 封堵、L3 ECH 剥离、L4 规则域名预解析与应答学习、L0 可见度统计都已实现，并在网络命名空间里做了集成测试；L4 的 `outer_sni` 规则已实现（外层 SNI 只由 `outer_sni` 匹配，不再当作域名）；UDP 代理已实现（`capture.udp: proxy`，经出口节点 / 直连，中继不承载 UDP；QUIC Initial SNI 嗅探支持 v1 / v2，跨数据报合并 ClientHello），在网络命名空间里做了集成测试；L5 浏览器策略尚未实现；验收项需要真实路由器，尚未完成 |
 | M2 桌面 | Windows Wintun、macOS utun、与系统 Tailscale 共存 | 官方客户端保持 tailnet 访问，tailproxy 负责出口分流 |
 | M3 移动 | Android VpnService、iOS NEPacketTunnelProvider（gomobile） | 单个 VPN 同时提供 tailnet 访问和多出口分流 |
 | M4 生态 | Rule Provider、出口组健康检查、指标、GUI | —。**已有**：`tpctl` 命令行（内置官方 tailscale CLI，操作 tailproxy 主节点，本机无需另装 tailscale；`tpctl schema` 输出配置 JSON Schema、OpenAPI、命令清单） |

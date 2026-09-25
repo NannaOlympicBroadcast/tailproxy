@@ -151,6 +151,9 @@ func setupCapture(cfg *config.Config, rules func() *rule.Engine, router *proxy.R
 		if c.learn != nil {
 			c.udpIn.Learned = c.learn.Lookup
 		}
+		if c.doh != nil {
+			c.udpIn.BlockDomain = c.doh.BlockedDomain
+		}
 	}
 
 	var exclude []netip.Prefix

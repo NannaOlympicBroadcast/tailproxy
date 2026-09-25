@@ -2,9 +2,11 @@ package proxy
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"net"
 	"net/netip"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -193,4 +195,82 @@ func TestTransparentUDP(t *testing.T) {
 		t.Error("reply socket not opened for the client")
 	}
 	replyMu.Unlock()
+}
+
+func rfcQUICInitial(t *testing.T) []byte {
+	t.Helper()
+	data, err := os.ReadFile("../sniff/testdata/rfc9001-client-initial.hex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := hex.DecodeString(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// A flow to a real address is named by the SNI of its QUIC ClientHello.
+func TestTransparentUDPQUICSNI(t *testing.T) {
+	echo := udpEcho(t)
+	eng, err := rule.Compile([]config.Rule{{DomainSuffix: []string{"example.com"}, Egress: "vps"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eg := &udpEgress{echo: echo}
+	tr := NewTracker()
+	r := &Router{Rules: func() *rule.Engine { return eng }, Egress: eg, Tracker: tr}
+	blocked := map[string]bool{}
+	in := &TransparentUDP{Router: r, Timeout: 300 * time.Millisecond, Logf: t.Logf,
+		BlockDomain: func(n string) bool { return blocked[n] },
+		Reply: func(orig, client netip.AddrPort) (net.Conn, error) {
+			return net.DialUDP("udp", nil, net.UDPAddrFromAddrPort(client))
+		}}
+	ln := newFakeUDPListener()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go in.Serve(ctx, ln)
+	client, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	caddr := client.LocalAddr().(*net.UDPAddr).AddrPort()
+
+	initial := rfcQUICInitial(t)
+	ln.ch <- udpPacket{initial, caddr, netip.MustParseAddrPort("192.0.2.10:443")}
+	client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 4096)
+	n, err := client.Read(buf)
+	if err != nil || n != len("echo:")+len(initial) {
+		t.Fatalf("reply: %d bytes, %v", n, err)
+	}
+
+	// The same name, blocked as a DoH endpoint.
+	blocked["example.com"] = true
+	ln.ch <- udpPacket{initial, caddr, netip.MustParseAddrPort("192.0.2.11:443")}
+	client.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if _, err := client.Read(buf); err == nil {
+		t.Fatal("blocked name got a reply")
+	}
+
+	waitFinished(t, tr, 2)
+	byDest := map[string]ConnView{}
+	for _, c := range tr.Snapshot().Recent {
+		byDest[c.DestIP] = c
+	}
+	if c := byDest["192.0.2.10"]; c.Host != "example.com" || c.DomainSrc != "quic" || c.Target != "vps" || c.Up != int64(len(initial)) {
+		t.Errorf("sniffed flow: %+v", c)
+	}
+	if c := byDest["192.0.2.11"]; c.Target != "reject" || !strings.Contains(c.Error, "DoH") {
+		t.Errorf("blocked flow: %+v", c)
+	}
+	if b := tr.Snapshot().Bypass; b.Sniffed != 2 || b.DoHBlocked != 1 { // both flows were named by their SNI
+		t.Errorf("bypass stats: %+v", b)
+	}
+	eg.mu.Lock()
+	defer eg.mu.Unlock()
+	if len(eg.dials) != 1 || eg.dials[0] != "udp vps example.com" {
+		t.Errorf("dials %v", eg.dials)
+	}
 }

@@ -245,10 +245,10 @@ dns:
 - 建一张 nftables 表 `inet tailproxy`，加一条策略路由（`fwmark 0x2000 → table 7893`，本地路由到 lo）。TCP 经 TPROXY 送进 tailproxy，本机和局域网的 DNS（53 端口）重定向到 tailproxy 的 DNS。
 - **selective（推荐）**：DNS 只给「可能命中非 direct 规则」的域名返回 FakeIP（`198.18.0.0/15`、`fc00::/18`），其余域名照常返回真实 IP。捕获只接管 FakeIP 地址池和规则里的 `ip_cidr`，所以没命中规则的流量**根本不经过 tailproxy**（DESIGN §4.6 的 A 路径）。
 - **all**：接管除私有、组播和 tailnet 地址以外的全部 TCP；域名靠 FakeIP 或 SNI / HTTP Host 嗅探得到，没命中规则的走 `direct`。
-- 连接的域名来源依次是：FakeIP 反查、TLS ClientHello 的 SNI、HTTP 的 Host。ECH 连接的 SNI 只是服务商的外层公共名（如 `cloudflare-ech.com`），不当作域名：普通域名规则不会匹配它，只有 `outer_sni` 规则会（见下文）；面板上显示为「ECH，外层 SNI …」。
+- 连接的域名来源依次是：FakeIP 反查、TLS ClientHello 的 SNI（UDP 为 QUIC Initial 中的 SNI）、HTTP 的 Host。ECH 连接的 SNI 只是服务商的外层公共名（如 `cloudflare-ech.com`），不当作域名：普通域名规则不会匹配它，只有 `outer_sni` 规则会（见下文）；面板上显示为「ECH，外层 SNI …」。
 - **UDP**：
   - `capture.udp: block`（默认）：发往 FakeIP 的 UDP（如 QUIC）立即返回「不可达」，应用马上改用 TCP；其他 UDP 不经过 tailproxy。
-  - `capture.udp: proxy`：UDP 和 TCP 使用同样的捕获范围和规则（53 端口除外，仍交给 DNS）。每个「客户端地址 × 原目的地址」是一条流，第一包决定路由（FakeIP 反查、学到的域名或 IP 规则；不做 QUIC SNI 嗅探），5 分钟没有数据包后结束。出口节点经 tsnet 转发 UDP，`direct` 带绕行标记直连。**中继出口只承载 TCP**，命中中继的 UDP 会被丢弃，QUIC 客户端会改用 TCP（可能要等到它自己的超时）。面板和 `tpctl conns` 里这类流标为 UDP。
+  - `capture.udp: proxy`：UDP 和 TCP 使用同样的捕获范围和规则（53 端口除外，仍交给 DNS）。每个「客户端地址 × 原目的地址」是一条流，第一包决定路由：FakeIP 反查；否则读 QUIC Initial 包里 ClientHello 的 SNI（Initial 包的密钥由客户端选的连接 ID 派生，不需要任何私钥；ClientHello 跨多个数据报时会合并，最多等 150 毫秒）；再否则用学到的域名或 IP 规则。5 分钟没有数据包后结束。出口节点经 tsnet 转发 UDP，`direct` 带绕行标记直连。**中继出口只承载 TCP**，命中中继的 UDP 会被丢弃，QUIC 客户端会改用 TCP（可能要等到它自己的超时）。面板和 `tpctl conns` 里这类流标为 UDP。
 - `use-application-dns.net` 返回 NXDOMAIN，让 Firefox 关闭默认开启的 DoH。
 - 发往 FakeIP 的 HTTPS / SVCB 记录返回空，防止客户端用记录里的 IP 提示或 ECH 配置绕开 FakeIP。
 - **封堵加密 DNS 通道（DESIGN §4.8 L2，默认开启）**：应用自己用 DoH 解析时，tailproxy 的 DNS 看不到查询，FakeIP 就拿不到域名。所以：
@@ -281,7 +281,7 @@ dns:
 
 **要求**：root；nftables（`nft` 命令）；内核支持 `nft_tproxy` / `nft_socket`（OpenWrt：`opkg install nftables kmod-nft-tproxy kmod-nft-socket`）。策略路由直接通过 netlink 设置，不依赖 `ip` 命令。IPv6 被禁用的主机会自动只用 IPv4。
 
-**验证情况**：`internal/capture` 的集成测试在独立的网络命名空间里跑真实的 nftables TPROXY，覆盖以下内容：UDP 代理（经 FakeIP 和 `ip_cidr` 交给出口、回包源地址是客户端发往的地址、中继目标不回包、发往被捕获地址的 DNS 仍由 DNS 前端处理）；DNS 劫持得到 FakeIP；FakeIP 连接按域名交给出口；`ip_cidr` + Host 嗅探；某个端口走 direct 的 FakeIP 域名（带绕行标记、用上游解析，不会再拿到 FakeIP）；UDP 到 FakeIP 立即不可达；DoH 域名 NXDOMAIN；DoH IP 的 443 和 853 端口立即 RST；带绕行标记的连接不被拦；SNI 为 DoH 端点的连接被拒；all 模式；real 模式下从 DNS 应答学到的地址被 selective 捕获，没有 SNI / Host 的连接按学到的域名交给出口；清理后无残留。还没有在真实路由器或局域网客户端上验证。
+**验证情况**：`internal/capture` 的集成测试在独立的网络命名空间里跑真实的 nftables TPROXY，覆盖以下内容：UDP 代理（经 FakeIP 和 `ip_cidr` 交给出口、回包源地址是客户端发往的地址、QUIC Initial 按 SNI 分流、中继目标不回包、发往被捕获地址的 DNS 仍由 DNS 前端处理）；QUIC 解密用 RFC 9001 / RFC 9369 附录 A 的测试向量验证；DNS 劫持得到 FakeIP；FakeIP 连接按域名交给出口；`ip_cidr` + Host 嗅探；某个端口走 direct 的 FakeIP 域名（带绕行标记、用上游解析，不会再拿到 FakeIP）；UDP 到 FakeIP 立即不可达；DoH 域名 NXDOMAIN；DoH IP 的 443 和 853 端口立即 RST；带绕行标记的连接不被拦；SNI 为 DoH 端点的连接被拒；all 模式；real 模式下从 DNS 应答学到的地址被 selective 捕获，没有 SNI / Host 的连接按学到的域名交给出口；清理后无残留。还没有在真实路由器或局域网客户端上验证。
 
 ### tpctl：本机命令行（不用再装 tailscale）
 
