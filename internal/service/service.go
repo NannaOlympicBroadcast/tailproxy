@@ -25,6 +25,9 @@ type Paths struct {
 	// RelayToken is relay.token: the token of `tailproxy relay` on this
 	// machine, which clients use to reach it.
 	RelayToken string
+	// LocalAPI is tailscaled.sock: the main node's LocalAPI while tailproxy
+	// runs (Unix only), used by `tpctl ts`.
+	LocalAPI string
 }
 
 // DefaultDir returns ~/.lighthousepro.
@@ -45,6 +48,7 @@ func NewPaths(dir string) Paths {
 		Token: filepath.Join(dir, "tailproxy.token"),
 
 		RelayToken: filepath.Join(dir, "relay.token"),
+		LocalAPI:   filepath.Join(dir, "tailscaled.sock"),
 	}
 }
 
@@ -67,6 +71,8 @@ type State struct {
 	Started   time.Time `json:"started"`
 	Manager   string    `json:"manager,omitempty"` // "systemd" when run as a systemd unit
 	UserUnit  bool      `json:"user_unit,omitempty"`
+	// LocalAPI is the main node's LocalAPI socket (tpctl ts), when open.
+	LocalAPI string `json:"local_api,omitempty"`
 }
 
 // ReadState returns the recorded instance, or (nil, nil) if there is none.

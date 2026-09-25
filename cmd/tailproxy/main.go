@@ -265,6 +265,11 @@ func cmdRun(args []string) (err error) {
 	p.SetRuntime(rt)
 
 	st := service.State{PID: os.Getpid(), URL: p.URL(), Config: f.config, TokenEnv: p.TokenEnv(), TokenFile: p.TokenFile(), Started: time.Now()}
+	localAPI, err := localAPIPath(f.paths.LocalAPI)
+	if err != nil {
+		log.Printf("tailproxy: LocalAPI socket (tpctl ts) disabled: %v", err)
+	}
+	st.LocalAPI = localAPI
 	underSystemd := service.UnderSystemd()
 	if underSystemd {
 		st.Manager = "systemd"
@@ -310,6 +315,11 @@ func cmdRun(args []string) (err error) {
 	}()
 	mgr.Start(ctx)
 	defer mgr.Close()
+	if localAPI != "" {
+		if err := serveLocalAPI(ctx, localAPI, mgr.DialLocalAPI); err != nil {
+			log.Printf("tailproxy: LocalAPI socket (tpctl ts): %v", err)
+		}
+	}
 	if rt.capture != nil {
 		go rt.capture.Serve(ctx)
 	}

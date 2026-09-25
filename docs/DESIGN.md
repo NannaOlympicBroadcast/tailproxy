@@ -221,8 +221,11 @@
 ### 4.9 控制面与「插件」接口〔无来源·设计决策〕
 
 - **配置文件**：YAML，支持热重载（规则和出口组可以热更新；槽位增删会触发对应 tsnet 节点的启停）。
-- **本地 API**：由 Web 面板端口（默认 7708）上的 REST 接口提供，所有请求都需要访问令牌；目前可查询状态、配置、出口和规则，保存规则、重新加载配置。连接列表、槽位运行状态和临时切换出口，要等出口管理器实现后再加。
-- **CLI**：`tailproxy start|run|stop|status|token`（已实现，见 README）。`start` 以后台进程运行，面板就绪后打印地址和令牌再退出前台；状态文件、日志和持久化的令牌文件放在 `~/.lighthousepro`。规则演练目前在 Web 面板里做，`tailproxy test <domain|ip>` 尚未实现。
+- **本地 API**：由 Web 面板端口（默认 7708）上的 REST 接口提供，所有请求都需要访问令牌。可以查询状态、配置、出口（含运行状态）、tailnet 设备、连接和规则；可以保存出口和规则、保存中继令牌和 auth key、重新加载配置。机器可读的描述由 `tpctl schema api`（OpenAPI 3.1）给出。
+- **主节点 LocalAPI**：tailproxy 运行时，把主节点的 tsnet LocalAPI（官方 tailscale CLI 使用的接口）转发到状态目录里的 Unix 套接字 `tailscaled.sock`（目录 700、套接字 600）。
+- **CLI**：
+  - `tailproxy start|run|stop|status|token|relay|service|capture`：进程生命周期、中继、systemd 和透明捕获清理。`start` 以后台进程运行，面板就绪后打印地址和令牌再退出前台；状态文件、日志和持久化的令牌文件放在 `~/.lighthousepro`。
+  - `tpctl`：日常操作，包括状态、出口增删改、规则测试、设备、连接和重新加载。`tpctl ts …` 内置官方 tailscale CLI，操作上面的主节点，所以本机不需要另装 tailscale，也不会多出一台设备。`tpctl schema config|api|commands` 输出配置 JSON Schema（由结构体反射生成）、OpenAPI 文档和命令清单。
 - **扩展点**：① Rule Provider；② Capture 后端接口（`Capture` interface，新平台只需实现它）；③ 可选的「sing-box 配置导出」后端，用作 PoC 或对照。
 - **移动端**：Go 核心通过 gomobile 编译为 Android AAR / iOS xcframework，外层是平台原生 UI。〔无来源·待验证：iOS Network Extension 的内存上限能否容纳多个 tsnet 节点〕
 
@@ -330,7 +333,7 @@ rules:
 | M1 Linux | nft TPROXY、FakeIP DNS、SNI/HTTP 嗅探、回环防护、CLI | 路由器（OpenWrt）上透明分流，没有 DNS 泄漏。**状态**：TPROXY（selective / all）、策略路由（netlink）、FakeIP + 分流 DNS、DNS 劫持、canary、SNI/Host 嗅探、防回环、`capture down`、L2 DoH/DoT/DoQ 封堵、L3 ECH 剥离、L4 规则域名预解析与应答学习、L0 可见度统计都已实现，并在网络命名空间里做了集成测试；UDP 代理、L4 的 `outer_sni` 规则、L5 浏览器策略尚未实现；验收项需要真实路由器，尚未完成 |
 | M2 桌面 | Windows Wintun、macOS utun、与系统 Tailscale 共存 | 官方客户端保持 tailnet 访问，tailproxy 负责出口分流 |
 | M3 移动 | Android VpnService、iOS NEPacketTunnelProvider（gomobile） | 单个 VPN 同时提供 tailnet 访问和多出口分流 |
-| M4 生态 | Rule Provider、出口组健康检查、指标、GUI | — |
+| M4 生态 | Rule Provider、出口组健康检查、指标、GUI | —。**已有**：`tpctl` 命令行（内置官方 tailscale CLI，操作 tailproxy 主节点，本机无需另装 tailscale；`tpctl schema` 输出配置 JSON Schema、OpenAPI、命令清单） |
 
 ## 8. 测试策略〔无来源·设计决策〕
 - 单元测试：规则匹配（边界：`notopenai.com`、大小写、末尾点号、IPv4-mapped IPv6）、SNI/QUIC 解析（使用固定抓包样本）。

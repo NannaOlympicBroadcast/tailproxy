@@ -739,3 +739,21 @@ func peerMatches(p *ipnstate.PeerStatus, host string) bool {
 	}
 	return false
 }
+
+// DialLocalAPI connects to the main node's LocalAPI (the interface the
+// official tailscale CLI speaks), so `tpctl ts ...` can operate the node
+// tailproxy is already logged in with instead of a second tailscaled.
+func (m *Manager) DialLocalAPI(ctx context.Context) (net.Conn, error) {
+	s := m.main
+	s.mu.Lock()
+	srv, started := s.srv, s.started
+	s.mu.Unlock()
+	if srv == nil || !started {
+		return nil, fmt.Errorf("%w: the main node is not running yet", ErrNotReady)
+	}
+	lc, err := srv.LocalClient()
+	if err != nil {
+		return nil, err
+	}
+	return lc.Dial(ctx, "tcp", "local-tailscaled.sock:80")
+}

@@ -16,7 +16,8 @@
 | SOCKS5 入口（`internal/proxy`，仅 CONNECT、仅回环地址）+ 连接追踪 | 已实现 |
 | 中继出口（`tailproxy relay` + `internal/relay`）：客户端只用一台 tailnet 设备就能有多个出口 | 已实现；已在真实 tailnet（中国 + 美国 VPS）上端到端验证 |
 | Linux 透明捕获（`capture.mode: tproxy`）：nftables TPROXY + 策略路由、FakeIP / 分流 DNS、SNI / HTTP Host 嗅探、DNS 劫持、防回环 | 已实现；在网络命名空间里做了端到端集成测试，**尚未在真实路由器 / OpenWrt 上验证** |
-| TUN（Windows / macOS / Android / iOS）、UDP 代理、DoH 端点封堵（L2）、ECH 剥离（L3） | 未实现 |
+| `tpctl` 本机命令行：管理 tailproxy + 内置官方 tailscale 客户端（操作主节点）+ schema | 已实现（`tpctl ts` 暂不支持 Windows） |
+| TUN（Windows / macOS / Android / iOS）、UDP 代理 | 未实现 |
 
 ## 启动与管理
 
@@ -269,6 +270,53 @@ dns:
 **要求**：root；nftables（`nft` 命令）；内核支持 `nft_tproxy` / `nft_socket`（OpenWrt：`opkg install nftables kmod-nft-tproxy kmod-nft-socket`）。策略路由直接通过 netlink 设置，不依赖 `ip` 命令。IPv6 被禁用的主机会自动只用 IPv4。
 
 **验证情况**：`internal/capture` 的集成测试在独立的网络命名空间里跑真实的 nftables TPROXY，覆盖以下内容：DNS 劫持得到 FakeIP；FakeIP 连接按域名交给出口；`ip_cidr` + Host 嗅探；某个端口走 direct 的 FakeIP 域名（带绕行标记、用上游解析，不会再拿到 FakeIP）；UDP 到 FakeIP 立即不可达；DoH 域名 NXDOMAIN；DoH IP 的 443 和 853 端口立即 RST；带绕行标记的连接不被拦；SNI 为 DoH 端点的连接被拒；all 模式；real 模式下从 DNS 应答学到的地址被 selective 捕获，没有 SNI / Host 的连接按学到的域名交给出口；清理后无残留。还没有在真实路由器或局域网客户端上验证。
+
+### tpctl：本机命令行（不用再装 tailscale）
+
+tailproxy 本身已经带着一个登录好的 Tailscale 节点（主节点）。如果为了 `tailscale status`、`ping` 这类操作再装一个官方客户端，这台机器就会变成**两台** tailnet 设备。`tpctl` 把这两件事合在一起：
+
+- **管理 tailproxy**（经本机 REST API，令牌自动从状态目录读取）：
+
+  ```sh
+  tpctl status                                    # 各组件状态
+  tpctl egress                                    # 出口列表
+  echo "$RELAY_TOKEN" | tpctl egress add us --relay 100.98.60.52:1081 --token-stdin
+  tpctl egress add jp --exit-node tokyo-vps
+  tpctl egress set us --exit-node ser647557941975
+  tpctl egress rm jp
+  tpctl rules test chat.openai.com 443            # 会走哪个出口
+  tpctl devices                                   # 主节点看到的设备
+  tpctl conns --all                               # 连接和域名可见度统计
+  tpctl reload
+  ```
+
+  中继令牌只从标准输入读取，不会出现在命令行参数和进程列表里。加 `--json` 输出原始 JSON。
+
+- **内置官方 tailscale 客户端**：`tpctl ts <子命令>` 就是官方 `tailscale` 命令（直接编译进来的同一份代码），操作对象是 tailproxy 的主节点：
+
+  ```sh
+  tpctl ts status
+  tpctl ts ping ser647557941975
+  tpctl ts ip -4
+  tpctl ts whois 100.98.60.52
+  tpctl ts netcheck
+  tpctl ts exit-node list
+  ```
+
+  也可以 `ln -s tpctl tailscale`，之后 `tailscale status` 就等同于 `tpctl ts status`。
+  - tailproxy 运行时，会在状态目录创建主节点的 LocalAPI 套接字 `tailscaled.sock`：目录权限 700，套接字权限 600，只有运行 tailproxy 的用户能用。路径超过 Unix 套接字长度上限时，改放在 `$TMPDIR/tailproxy-<uid>/`，实际路径记在 `tailproxy.json` 里。
+  - `down` / `logout` / `up` / `set` / `switch` 会影响主节点，中继和设备列表都依赖它，所以需要加 `--yes` 确认（通过 `tailscale` 软链接调用时不需要，和官方客户端一致）。
+  - 暂不支持 Windows：官方客户端在 Windows 上走命名管道，需要单独处理权限。
+
+- **schema**：给脚本和 AI 代理用的机器可读描述，不需要 tailproxy 在运行：
+
+  ```sh
+  tpctl schema config     # 配置文件的 JSON Schema（draft 2020-12），由配置结构体反射生成，与解析器一致
+  tpctl schema api        # REST API 的 OpenAPI 3.1 文档
+  tpctl schema commands   # tpctl 全部命令、参数、是否会修改状态、用到的 API
+  ```
+
+  测试会检查：每个配置字段都有说明；示例配置里的每个键都在 schema 中；OpenAPI 的路径与面板实际注册的路由完全一致。另外用第三方校验器验证过：`jsonschema` 校验示例配置通过，并能拦住故意写错的配置；`openapi-spec-validator` 校验 OpenAPI 文档通过。
 
 ### API
 
