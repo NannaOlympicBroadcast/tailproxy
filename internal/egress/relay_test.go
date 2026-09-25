@@ -148,16 +148,19 @@ rules: []
 		t.Fatalf("health: %+v", h)
 	}
 
-	// A token file readable by others is refused.
-	m2dir := t.TempDir()
-	os.MkdirAll(filepath.Join(m2dir, "relay"), 0o700)
-	os.WriteFile(filepath.Join(m2dir, "relay", "x.token"), []byte(tok), 0o644)
-	m2, err := New(mustParse(t, "egress: [{name: x, relay: '127.0.0.1:1'}]\nrules: []\n"), m2dir, t.Logf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st := m2.Status()[0]; st.State != StateError || !strings.Contains(st.Detail, "chmod 600") {
-		t.Fatalf("world-readable token: %+v", st)
+	// A token file readable by others is refused (Unix only: Windows has no
+	// permission bits and the check is skipped there).
+	if runtime.GOOS != "windows" {
+		m2dir := t.TempDir()
+		os.MkdirAll(filepath.Join(m2dir, "relay"), 0o700)
+		os.WriteFile(filepath.Join(m2dir, "relay", "x.token"), []byte(tok), 0o644)
+		m2, err := New(mustParse(t, "egress: [{name: x, relay: '127.0.0.1:1'}]\nrules: []\n"), m2dir, t.Logf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st := m2.Status()[0]; st.State != StateError || !strings.Contains(st.Detail, "chmod 600") {
+			t.Fatalf("world-readable token: %+v", st)
+		}
 	}
 
 	// Removing the relay forgets its token.

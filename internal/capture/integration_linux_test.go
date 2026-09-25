@@ -280,7 +280,10 @@ func netnsTest(t *testing.T) {
 		out, _ := exec.Command("nft", "list", "table", "inet", capture.TableName).CombinedOutput()
 		t.Fatalf("hijacked DNS: %v %v (dns queries=%d fwd=%d fail=%d)\n%s", addrs, err, dns.Queries.Load(), dns.Forwarded.Load(), dns.Failed.Load(), out)
 	}
-	if _, err := sysResolver.LookupNetIP(ctx, "ip4", dnsserver.CanaryDomain); err == nil {
+	// Negative lookups use rooted names: otherwise, after NXDOMAIN, Go tries
+	// the resolv.conf search list (set on CI runners), and the test
+	// upstream answers every name.
+	if _, err := sysResolver.LookupNetIP(ctx, "ip4", dnsserver.CanaryDomain+"."); err == nil {
 		t.Fatal("canary resolved")
 	}
 	t.Logf("www.egress.test -> %s (FakeIP via hijacked DNS)", addrs[0])
@@ -327,7 +330,7 @@ func netnsTest(t *testing.T) {
 	// TCP to the same FakeIP still works (checked above), so the rule is UDP-only.
 
 	// 6b. Anti-bypass (DESIGN §4.8 L2).
-	if _, err := sysResolver.LookupNetIP(ctx, "ip4", "mozilla.cloudflare-dns.com"); err == nil {
+	if _, err := sysResolver.LookupNetIP(ctx, "ip4", "mozilla.cloudflare-dns.com."); err == nil {
 		t.Fatal("DoH endpoint name resolved")
 	}
 	refused := func(what, addr string, control func(string, string, syscall.RawConn) error) error {
