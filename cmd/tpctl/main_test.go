@@ -23,6 +23,7 @@ type fakePanel struct {
 	revision string
 	tokens   map[string]string
 	auth     string
+	lastTest map[string]any // body of the last POST /api/v1/rules/test
 }
 
 func (f *fakePanel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -54,6 +55,8 @@ func (f *fakePanel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.tokens[strings.Split(r.URL.Path, "/")[4]] = req.Token
 		io.WriteString(w, `{"ok":true}`)
 	case r.Method == "POST" && r.URL.Path == "/api/v1/rules/test":
+		f.lastTest = nil
+		json.NewDecoder(r.Body).Decode(&f.lastTest)
 		io.WriteString(w, `{"rule_index":0,"target":"us","reason":"domain_suffix \"openai.com\""}`)
 	default:
 		w.WriteHeader(404)
@@ -118,6 +121,24 @@ func TestEgressCommands(t *testing.T) {
 	}
 	if err := tp("rules", "test", "chat.openai.com", "443"); err != nil {
 		t.Fatal(err)
+	}
+	if f.lastTest["domain"] != "chat.openai.com" || f.lastTest["port"] != 443.0 || f.lastTest["outer_sni"] != nil {
+		t.Fatalf("rules test body: %v", f.lastTest)
+	}
+	if err := tp("rules", "test", "104.16.1.1", "443", "--outer-sni", "cloudflare-ech.com"); err != nil {
+		t.Fatal(err)
+	}
+	if f.lastTest["ip"] != "104.16.1.1" || f.lastTest["outer_sni"] != "cloudflare-ech.com" {
+		t.Fatalf("rules test --outer-sni: %v", f.lastTest)
+	}
+	if err := tp("rules", "test", "-", "--outer-sni", "cloudflare-ech.com"); err != nil {
+		t.Fatal(err)
+	}
+	if f.lastTest["ip"] != nil || f.lastTest["domain"] != nil || f.lastTest["outer_sni"] != "cloudflare-ech.com" {
+		t.Fatalf("rules test -: %v", f.lastTest)
+	}
+	if err := tp("rules", "test", "-"); err == nil {
+		t.Fatal("rules test - without --outer-sni accepted")
 	}
 	if err := tp("frobnicate"); err == nil || !strings.Contains(err.Error(), "未知命令") {
 		t.Fatalf("unknown command: %v", err)

@@ -45,8 +45,12 @@ type Dest struct {
 	Domain    string     // "" if unknown
 	IP        netip.Addr // real destination address; invalid for FakeIPs
 	Port      uint16
-	DomainSrc string // socks, fakeip, tls, http
+	DomainSrc string // socks, fakeip, tls, http, learned
 	ECH       bool
+	// OuterSNI is the outer name of an ECH ClientHello. It is the
+	// provider's public name, not the site, so it is kept out of Domain
+	// and only outer_sni rules match it (DESIGN §4.8 L4).
+	OuterSNI string
 	// Transparent is set for captured connections, where UnknownDomain
 	// applies.
 	Transparent bool
@@ -69,9 +73,11 @@ func (r *Router) Connect(ctx context.Context, inbound, source, host string, port
 // ConnectDest is Connect for a destination that may have both a domain and
 // an address. Domain rules see the domain; IP rules see the real address.
 func (r *Router) ConnectDest(ctx context.Context, inbound, source string, d Dest) (net.Conn, *Conn, error) {
-	q := rule.Query{Domain: d.Domain, IP: d.IP, Port: d.Port}
+	q := rule.Query{Domain: d.Domain, IP: d.IP, Port: d.Port, OuterSNI: d.OuterSNI}
 	res := r.Rules().Match(q)
-	if d.Transparent && d.Domain == "" {
+	// An explicit outer_sni match is the user's answer for an unknown
+	// domain, so the unknown_domain policy does not override it.
+	if d.Transparent && d.Domain == "" && !res.ByOuterSNI {
 		switch {
 		case r.UnknownDomain == "reject":
 			res = rule.Result{RuleIndex: -1, Target: config.TargetReject, Reason: "domain unknown (dns.unknown_domain: reject)"}
@@ -83,7 +89,7 @@ func (r *Router) ConnectDest(ctx context.Context, inbound, source string, d Dest
 	if host == "" {
 		host = d.IP.String()
 	}
-	c := &Conn{Inbound: inbound, Source: source, Host: host, Port: d.Port, DomainSrc: d.DomainSrc, ECH: d.ECH,
+	c := &Conn{Inbound: inbound, Source: source, Host: host, Port: d.Port, DomainSrc: d.DomainSrc, ECH: d.ECH, OuterSNI: d.OuterSNI,
 		RuleIndex: res.RuleIndex, Reason: res.Reason, Target: res.Target}
 	if d.IP.IsValid() && d.Domain != "" {
 		c.DestIP = d.IP.String()

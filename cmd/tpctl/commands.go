@@ -52,7 +52,8 @@ func init() {
 		{Name: "egress relay-token", Args: []string{"<name>"}, Mutates: true, Summary: "从标准输入读取并保存中继出口的令牌（不经过命令行参数，避免出现在进程列表里）",
 			APIPaths: []string{"PUT /api/v1/egress/{name}/relay-token"}, run: cmdRelayToken},
 		{Name: "rules list", Summary: "规则列表（首条命中）", APIPaths: []string{"GET /api/v1/rules"}, run: cmdRulesList},
-		{Name: "rules test", Args: []string{"<domain|ip>", "[port]"}, Summary: "测试一个域名或 IP（可带端口）会命中哪条规则、走哪个出口",
+		{Name: "rules test", Args: []string{"<domain|ip|->", "[port]"}, Summary: "测试一个域名或 IP（可带端口）会命中哪条规则、走哪个出口",
+			Flags:    []Flag{{"outer-sni", "string", "ECH 外层 SNI（测试 outer_sni 规则；只测外层名时第一个参数写 -）"}},
 			APIPaths: []string{"POST /api/v1/rules/test"}, run: cmdRulesTest},
 		{Name: "devices", Summary: "主节点看到的 tailnet 设备（在线状态、出口节点、被哪个出口使用）", APIPaths: []string{"GET /api/v1/tailnet"}, run: cmdDevices},
 		{Name: "conns", Summary: "活动连接、最近连接和域名可见度统计", Flags: []Flag{{"all", "bool", "同时列出最近结束的连接"}},
@@ -126,7 +127,7 @@ func parseFlags(c *Command, args []string) (*flag.FlagSet, map[string]*string, m
 	var pos, flags []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		if strings.HasPrefix(a, "-") {
+		if strings.HasPrefix(a, "-") && a != "-" { // a lone "-" is an argument
 			flags = append(flags, a)
 			name := strings.TrimLeft(strings.SplitN(a, "=", 2)[0], "-")
 			if _, isStr := strs[name]; isStr && !strings.Contains(a, "=") && i+1 < len(args) {
@@ -464,6 +465,7 @@ func cmdRulesList(g globals, _ []string) error {
 			add("domain_suffix", x.DomainSuffix)
 			add("domain_keyword", x.DomainKeyword)
 			add("ip_cidr", x.IPCIDR)
+			add("outer_sni", x.OuterSNI)
 			if len(x.Port) > 0 {
 				var ps []string
 				for _, p := range x.Port {
@@ -483,14 +485,28 @@ func cmdRulesList(g globals, _ []string) error {
 }
 
 func cmdRulesTest(g globals, args []string) error {
+	cmd, _ := lookup([]string{"rules", "test"})
+	fs, s, _, err := parseFlags(cmd, args)
+	if err != nil {
+		return err
+	}
+	args = fs.Args()
 	if len(args) < 1 || len(args) > 2 {
-		return errors.New("用法：tpctl rules test <域名|IP> [端口]")
+		return errors.New("用法：tpctl rules test <域名|IP|-> [端口] [--outer-sni 外层名]")
 	}
 	q := map[string]any{}
-	if strings.ContainsAny(args[0], ":") || strings.Trim(args[0], "0123456789.") == "" {
+	switch {
+	case args[0] == "-":
+		if *s["outer-sni"] == "" {
+			return errors.New("第一个参数为 - 时需要 --outer-sni")
+		}
+	case strings.ContainsAny(args[0], ":") || strings.Trim(args[0], "0123456789.") == "":
 		q["ip"] = args[0]
-	} else {
+	default:
 		q["domain"] = args[0]
+	}
+	if *s["outer-sni"] != "" {
+		q["outer_sni"] = *s["outer-sni"]
 	}
 	if len(args) == 2 {
 		p, err := strconv.ParseUint(args[1], 10, 16)

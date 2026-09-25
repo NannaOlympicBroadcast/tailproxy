@@ -14,7 +14,7 @@ func TestExampleConfigParses(t *testing.T) {
 	if c.Panel.Listen != "127.0.0.1:7708" {
 		t.Fatalf("panel.listen = %q", c.Panel.Listen)
 	}
-	if len(c.Egress) != 4 || len(c.Rules) != 5 {
+	if len(c.Egress) != 4 || len(c.Rules) != 6 || len(c.Rules[4].OuterSNI) != 1 {
 		t.Fatalf("got %d egress, %d rules", len(c.Egress), len(c.Rules))
 	}
 	if !c.Egress[2].IsRelay() || c.Egress[0].IsRelay() || c.Egress[3].IsRelay() {

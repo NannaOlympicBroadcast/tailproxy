@@ -135,3 +135,39 @@ func TestRoutedHosts(t *testing.T) {
 		}
 	}
 }
+
+func TestOuterSNI(t *testing.T) {
+	e := mustEngine(t, []config.Rule{
+		{DomainSuffix: []string{"cloudflare-ech.com"}, Egress: "jp"}, // a domain rule never sees outer names
+		{OuterSNI: []string{".Cloudflare-ECH.com"}, Port: []uint16{443}, Egress: "us"},
+		{OuterSNI: []string{"public.example"}, IPCIDR: []string{"203.0.113.0/24"}, Egress: "jp"},
+	})
+	tests := []struct {
+		name    string
+		q       Query
+		target  string
+		index   int
+		byOuter bool
+	}{
+		{"outer name, exact", Query{OuterSNI: "cloudflare-ech.com", Port: 443}, "us", 1, true},
+		{"outer name, subdomain and case", Query{OuterSNI: "X.CLOUDFLARE-ECH.COM.", Port: 443}, "us", 1, true},
+		{"outer name, port AND-ed", Query{OuterSNI: "cloudflare-ech.com", Port: 8443}, "direct", -1, false},
+		{"label boundary", Query{OuterSNI: "notcloudflare-ech.com", Port: 443}, "direct", -1, false},
+		{"real domain still matches domain rules", Query{Domain: "cloudflare-ech.com", Port: 443}, "jp", 0, false},
+		{"outer_sni OR ip_cidr: ip", Query{IP: netip.MustParseAddr("203.0.113.5"), OuterSNI: "other.example"}, "jp", 2, false},
+		{"outer_sni OR ip_cidr: outer", Query{IP: netip.MustParseAddr("192.0.2.1"), OuterSNI: "a.public.example"}, "jp", 2, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := e.Match(tt.q)
+			if r.Target != tt.target || r.RuleIndex != tt.index || r.ByOuterSNI != tt.byOuter {
+				t.Fatalf("Match(%+v) = %+v, want target %q index %d byOuter %v", tt.q, r, tt.target, tt.index, tt.byOuter)
+			}
+		})
+	}
+	// An outer_sni-only rule says nothing about names seen in DNS.
+	only := mustEngine(t, []config.Rule{{OuterSNI: []string{"cloudflare-ech.com"}, Egress: "us"}})
+	if only.DomainMayRoute("chat.openai.com") || only.DomainMayRoute("cloudflare-ech.com") {
+		t.Error("outer_sni-only rule must not make DNS names routed")
+	}
+}

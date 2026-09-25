@@ -72,6 +72,7 @@ var fields = map[string]meta{
 	"rules[].domain_suffix":          {desc: "域名后缀（含自身）"},
 	"rules[].domain_keyword":         {desc: "域名包含的关键词"},
 	"rules[].ip_cidr":                {desc: "IP 网段"},
+	"rules[].outer_sni":              {desc: "ECH 外层 SNI（服务商公共名，如 cloudflare-ech.com），后缀匹配。只在 ClientHello 带 ECH、又查不到真实域名时参与匹配；普通域名条件不会匹配外层名（DESIGN §4.8 L4）"},
 	"rules[].port":                   {desc: "目的端口"},
 	"rules[].egress":                 {desc: "目标：出口名称，或 direct / reject / tailnet（与 final 二选一）"},
 	"rules[].final":                  {desc: "兜底目标，只能出现在最后一条"},

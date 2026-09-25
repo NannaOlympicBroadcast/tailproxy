@@ -21,7 +21,8 @@ type Conn struct {
 	Port      uint16
 	DestIP    string // original destination IP (transparent capture), if any
 	DomainSrc string // where Host came from: socks, fakeip, tls, http; "" for none
-	ECH       bool   // ClientHello had ECH: a sniffed Host is only the outer name
+	ECH       bool   // ClientHello had ECH
+	OuterSNI  string // ECH outer (public) name; not the site, so not in Host
 	RuleIndex int
 	Reason    string
 	Target    string // rule target: direct, reject, tailnet or an egress name
@@ -46,6 +47,7 @@ type ConnView struct {
 	DestIP    string     `json:"dest_ip,omitempty"`
 	DomainSrc string     `json:"domain_source,omitempty"`
 	ECH       bool       `json:"ech,omitempty"`
+	OuterSNI  string     `json:"outer_sni,omitempty"`
 	RuleIndex int        `json:"rule_index"`
 	Reason    string     `json:"reason"`
 	Target    string     `json:"target"`
@@ -102,7 +104,7 @@ func (c *Conn) view() ConnView {
 	defer c.mu.Unlock()
 	v := ConnView{
 		ID: c.ID, Started: c.Started, Inbound: c.Inbound, Source: c.Source, Host: c.Host, Port: c.Port,
-		DestIP: c.DestIP, DomainSrc: c.DomainSrc, ECH: c.ECH,
+		DestIP: c.DestIP, DomainSrc: c.DomainSrc, ECH: c.ECH, OuterSNI: c.OuterSNI,
 		RuleIndex: c.RuleIndex, Reason: c.Reason, Target: c.Target, Via: c.Via,
 		Up: c.up.Load(), Down: c.down.Load(), Error: c.err,
 	}

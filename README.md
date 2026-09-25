@@ -9,7 +9,7 @@
 | 模块 | 状态 |
 |---|---|
 | 配置加载与校验（`internal/config`） | 已实现 |
-| 规则引擎（`internal/rule`，首条命中；keyword / suffix / domain / ip_cidr / port） | 已实现 |
+| 规则引擎（`internal/rule`，首条命中；keyword / suffix / domain / ip_cidr / outer_sni / port） | 已实现 |
 | Web 面板 + REST API + `/metrics`（`internal/panel`，端口 7708） | 已实现 |
 | 命令行 start / stop / status / token、systemd 开机自启 | 已实现 |
 | 出口管理器（`internal/egress`）：每个出口一个内嵌 tsnet 节点、固定出口节点、经出口的 DoH 解析、故障转移 / 延迟优选组与健康检查 | 已实现；出口节点出口已在真实 tailnet 上验证（见下文），出口组尚未在真实环境验证 |
@@ -117,7 +117,7 @@ TAILPROXY_PANEL_TOKEN='至少16个字符的令牌' ./tailproxy start -c config.e
 
 - **概览**：各组件状态、规则和出口数量、重新加载配置。
 - **出口**：Tailscale 账号登录、账号下的设备列表、已配置的出口（出口节点 / 中继 / 出口组）及其运行状态。
-- **规则**：规则列表、可视化编辑，以及规则测试（输入域名 / IP / 端口，查看命中哪条规则、走哪个出口）。
+- **规则**：规则列表、可视化编辑，以及规则测试（输入域名 / IP / ECH 外层 SNI / 端口，查看命中哪条规则、走哪个出口）。
 - **配置**：当前生效的配置。
 
 ### 出口与 SOCKS5 入口
@@ -243,7 +243,7 @@ dns:
 - 建一张 nftables 表 `inet tailproxy`，加一条策略路由（`fwmark 0x2000 → table 7893`，本地路由到 lo）。TCP 经 TPROXY 送进 tailproxy，本机和局域网的 DNS（53 端口）重定向到 tailproxy 的 DNS。
 - **selective（推荐）**：DNS 只给「可能命中非 direct 规则」的域名返回 FakeIP（`198.18.0.0/15`、`fc00::/18`），其余域名照常返回真实 IP。捕获只接管 FakeIP 地址池和规则里的 `ip_cidr`，所以没命中规则的流量**根本不经过 tailproxy**（DESIGN §4.6 的 A 路径）。
 - **all**：接管除私有、组播和 tailnet 地址以外的全部 TCP；域名靠 FakeIP 或 SNI / HTTP Host 嗅探得到，没命中规则的走 `direct`。
-- 连接的域名来源依次是：FakeIP 反查、TLS ClientHello 的 SNI、HTTP 的 Host。ECH 连接的 SNI 只是外层公共名，面板上会标出来；有 FakeIP 映射时以映射为准。
+- 连接的域名来源依次是：FakeIP 反查、TLS ClientHello 的 SNI、HTTP 的 Host。ECH 连接的 SNI 只是服务商的外层公共名（如 `cloudflare-ech.com`），不当作域名：普通域名规则不会匹配它，只有 `outer_sni` 规则会（见下文）；面板上显示为「ECH，外层 SNI …」。
 - 发往 FakeIP 的 UDP（如 QUIC）会立刻返回「不可达」，应用会马上改用 TCP。目前只代理 TCP。
 - `use-application-dns.net` 返回 NXDOMAIN，让 Firefox 关闭默认开启的 DoH。
 - 发往 FakeIP 的 HTTPS / SVCB 记录返回空，防止客户端用记录里的 IP 提示或 ECH 配置绕开 FakeIP。
@@ -261,6 +261,14 @@ dns:
   - 学到的地址也会加入 selective 模式的捕获范围，所以 `dns.mode: real` 也能用 selective。
 
   代价是 CDN 共享 IP：同一个地址对应多个域名时，以最近一次应答为准（DESIGN §4.8 L4）。`learn_rule_ips: false` 可以关闭。
+- **`outer_sni` 规则（L4）**：ECH 连接查不到真实域名时，可以按外层 SNI 粗粒度分流，例如把所有经 Cloudflare ECH 的连接交给某个出口：
+
+  ```yaml
+  rules:
+    - { outer_sni: [cloudflare-ech.com], port: [443], egress: us }
+  ```
+
+  按后缀匹配；和同一条规则里的域名条件、`ip_cidr` 是「或」，和 `port` 是「且」。只在 ClientHello 带 ECH、又没有 FakeIP 映射或学到的域名时参与；命中后 `unknown_domain` 不再生效，出口按目的 IP 连接。外层名背后可能是任意网站，所以这是粗粒度的兜底。selective 模式只捕获 FakeIP、`ip_cidr` 和学到的地址，要让 `outer_sni` 看到其他 ECH 连接，需要 `capture.scope: all`。
 - **可见度统计（L0）**：面板「连接」页会统计透明捕获连接的域名来源（FakeIP / SNI / 未知）、带 ECH 的连接数和拦截的 DoH 次数，并列出「域名未知」最多的目的地，直接给出旁路影响有多大。
 
 防回环：Tailscale 在 Linux 上以 root 运行时，会给自己的套接字打 `SO_MARK 0x80000`（`tailscale.com/net/netns`），tsnet 同样如此。tailproxy 的直连和上游 DNS 查询也打这个标记，nft 规则会放过带这个标记的包，所以既不会回环，也不会把 tsnet 自己的 WireGuard 流量再抓回来。
@@ -285,6 +293,7 @@ tailproxy 本身已经带着一个登录好的 Tailscale 节点（主节点）�
   tpctl egress set us --exit-node ser647557941975
   tpctl egress rm jp
   tpctl rules test chat.openai.com 443            # 会走哪个出口
+  tpctl rules test - 443 --outer-sni cloudflare-ech.com   # ECH 连接按外层 SNI 会走哪个出口
   tpctl devices                                   # 主节点看到的设备
   tpctl conns --all                               # 连接和域名可见度统计
   tpctl reload
@@ -340,7 +349,7 @@ tailproxy 本身已经带着一个登录好的 Tailscale 节点（主节点）�
 
 ### 可视化编辑规则
 
-在「规则」页点「编辑规则」，可以：增删规则、上下移动（首条命中，顺序很重要）、为每条规则选择目标出口、分别填写关键词 / 后缀 / 完整域名 / IP 段 / 端口，以及设置兜底（final）。编辑期间，规则测试使用尚未保存的草稿。
+在「规则」页点「编辑规则」，可以：增删规则、上下移动（首条命中，顺序很重要）、为每条规则选择目标出口、分别填写关键词 / 后缀 / 完整域名 / IP 段 / ECH 外层 SNI / 端口，以及设置兜底（final）。编辑期间，规则测试使用尚未保存的草稿。
 
 点「保存」后：
 

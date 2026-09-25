@@ -547,7 +547,7 @@ function connRow(c, active) {
   const meta = [c.inbound, c.source];
   if (c.domain_source && c.domain_source !== "socks") meta.push("域名来自 " + (SRC[c.domain_source] || c.domain_source));
   if (c.dest_ip) meta.push("目的 IP " + c.dest_ip);
-  if (c.ech) meta.push("ECH（SNI 仅为外层名）");
+  if (c.ech) meta.push(c.outer_sni ? "ECH，外层 SNI " + c.outer_sni : "ECH");
   dst.append(el("div", meta.join(" · "), "muted"));
   tr.append(dst);
   tr.append(el("td", c.rule_index >= 0 ? `#${c.rule_index} ${c.reason}` : c.reason));
@@ -593,7 +593,8 @@ async function loadConnections() {
 }
 
 const COND_LABELS = [
-  ["domain", "域名"], ["domain_suffix", "后缀"], ["domain_keyword", "关键词"], ["ip_cidr", "IP 段"], ["port", "端口"],
+  ["domain", "域名"], ["domain_suffix", "后缀"], ["domain_keyword", "关键词"], ["ip_cidr", "IP 段"],
+  ["outer_sni", "ECH 外层 SNI"], ["port", "端口"],
 ];
 
 let rulesState = { rules: [], targets: [], revision: "" };
@@ -685,7 +686,7 @@ $("test").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const out = $("test-result");
   const port = $("t-port").value;
-  const body = { domain: $("t-domain").value.trim(), ip: $("t-ip").value.trim(), port: port ? Number(port) : 0 };
+  const body = { domain: $("t-domain").value.trim(), ip: $("t-ip").value.trim(), outer_sni: $("t-outer").value.trim(), port: port ? Number(port) : 0 };
   out.hidden = false;
   out.replaceChildren(el("span", "测试中…", "muted"));
   try {
@@ -716,6 +717,7 @@ const EDIT_FIELDS = [
   ["domain_suffix", "域名后缀", "例：.jp"],
   ["domain", "完整域名", "例：www.example.com"],
   ["ip_cidr", "IP 段", "例：203.0.113.0/24"],
+  ["outer_sni", "ECH 外层 SNI（后缀匹配；只在 ClientHello 带 ECH 且查不到真实域名时参与）", "例：cloudflare-ech.com"],
   ["port", "端口（可选）", "例：443"],
 ];
 

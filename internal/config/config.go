@@ -182,9 +182,13 @@ type Rule struct {
 	DomainSuffix  []string `yaml:"domain_suffix,omitempty" json:"domain_suffix,omitempty"`
 	DomainKeyword []string `yaml:"domain_keyword,omitempty" json:"domain_keyword,omitempty"`
 	IPCIDR        []string `yaml:"ip_cidr,omitempty" json:"ip_cidr,omitempty"`
-	Port          []uint16 `yaml:"port,omitempty" json:"port,omitempty"`
-	Egress        string   `yaml:"egress,omitempty" json:"egress,omitempty"`
-	Final         string   `yaml:"final,omitempty" json:"final,omitempty"`
+	// OuterSNI matches the outer (public) server name of a TLS ClientHello
+	// that uses ECH, by suffix (DESIGN §4.8 L4). Such a name is the
+	// provider's, not the site's, so it never matches the domain fields.
+	OuterSNI []string `yaml:"outer_sni,omitempty" json:"outer_sni,omitempty"`
+	Port     []uint16 `yaml:"port,omitempty" json:"port,omitempty"`
+	Egress   string   `yaml:"egress,omitempty" json:"egress,omitempty"`
+	Final    string   `yaml:"final,omitempty" json:"final,omitempty"`
 }
 
 // Target returns the rule's destination (egress name or reserved target).
@@ -324,7 +328,7 @@ func (c *Config) Validate() error {
 		if t := r.Target(); !IsReservedTarget(t) && !names[t] {
 			errs = append(errs, fmt.Errorf("rules[%d]: unknown target %q", i, t))
 		}
-		hasCond := len(r.Domain)+len(r.DomainSuffix)+len(r.DomainKeyword)+len(r.IPCIDR)+len(r.Port) > 0
+		hasCond := len(r.Domain)+len(r.DomainSuffix)+len(r.DomainKeyword)+len(r.IPCIDR)+len(r.OuterSNI)+len(r.Port) > 0
 		if r.Final != "" {
 			if hasCond {
 				errs = append(errs, fmt.Errorf("rules[%d]: final rule cannot have match conditions", i))
@@ -338,7 +342,7 @@ func (c *Config) Validate() error {
 		for _, f := range []struct {
 			name string
 			vals []string
-		}{{"domain", r.Domain}, {"domain_suffix", r.DomainSuffix}, {"domain_keyword", r.DomainKeyword}} {
+		}{{"domain", r.Domain}, {"domain_suffix", r.DomainSuffix}, {"domain_keyword", r.DomainKeyword}, {"outer_sni", r.OuterSNI}} {
 			for _, v := range f.vals {
 				if v = strings.TrimSpace(v); v == "" || v == "." {
 					errs = append(errs, fmt.Errorf("rules[%d]: empty value in %s", i, f.name))

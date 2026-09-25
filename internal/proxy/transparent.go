@@ -31,7 +31,8 @@ type Transparent struct {
 	BlockDomain func(string) bool
 	// Learned, if set, maps a real address back to the name it was
 	// resolved for (DESIGN §4.8 L4). It is used when sniffing finds no
-	// name, and in place of an ECH outer SNI.
+	// name, including when the ClientHello uses ECH: its SNI is then only
+	// the outer (public) name, kept apart as Dest.OuterSNI.
 	Learned func(netip.Addr) (string, bool)
 	Logf    func(string, ...any)
 }
@@ -106,12 +107,14 @@ func (t *Transparent) handle(ctx context.Context, client net.Conn) {
 		}
 		res, wrapped := sniff.Peek(client, timeout)
 		in = wrapped
-		if res.Host != "" {
-			d.Domain, d.DomainSrc, d.ECH = res.Host, res.Protocol, res.ECH
+		d.ECH = res.ECH
+		switch {
+		case res.ECH:
+			d.OuterSNI = res.Host
+		case res.Host != "":
+			d.Domain, d.DomainSrc = res.Host, res.Protocol
 		}
-		// ECH's outer SNI is only the provider's public name: a name the
-		// client actually resolved to this address is better.
-		if (d.Domain == "" || d.ECH) && t.Learned != nil {
+		if d.Domain == "" && t.Learned != nil {
 			if name, ok := t.Learned(ip); ok {
 				d.Domain, d.DomainSrc = name, "learned"
 			}
@@ -120,7 +123,7 @@ func (t *Transparent) handle(ctx context.Context, client net.Conn) {
 
 	t.Router.Tracker.bypass.observe(d)
 	if d.Domain != "" && t.BlockDomain != nil && t.BlockDomain(d.Domain) {
-		c := &Conn{Inbound: "tproxy", Source: source, Host: d.Domain, Port: d.Port, DomainSrc: d.DomainSrc, ECH: d.ECH,
+		c := &Conn{Inbound: "tproxy", Source: source, Host: d.Domain, Port: d.Port, DomainSrc: d.DomainSrc, ECH: d.ECH, OuterSNI: d.OuterSNI,
 			RuleIndex: -1, Target: "reject", Reason: "DoH endpoint (dns.anti_bypass.block_doh)"}
 		if d.IP.IsValid() {
 			c.DestIP = d.IP.String()

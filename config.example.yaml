@@ -55,4 +55,6 @@ rules:
   - { domain_suffix: [.jp, nicovideo.jp],         egress: jp }
   - { ip_cidr: [203.0.113.0/24],                  egress: jp }
   - { domain_suffix: [.ts.net], ip_cidr: [100.64.0.0/10], egress: tailnet }
+  # ECH 连接查不到真实域名时，按外层公共名粗粒度分流（只匹配 ECH 外层 SNI）
+  - { outer_sni: [cloudflare-ech.com], port: [443], egress: us }
   - { final: direct }

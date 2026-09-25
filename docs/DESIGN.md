@@ -330,7 +330,7 @@ rules:
 | 阶段 | 内容 | 验收 |
 |---|---|---|
 | M0 PoC | 两个 tsnet 槽位加 SOCKS5 入口，支持 keyword/CIDR 规则 | 通过两个槽位访问 IP 回显服务，返回的是两个不同出口的公网 IP。**状态：已验收（2026-09-24）**：在真实 tailnet 上，同一客户端经中国、美国两个出口分别得到 106.52.30.242 和 186.244.245.39（出口节点和中继两种方式都验证过，见 README） |
-| M1 Linux | nft TPROXY、FakeIP DNS、SNI/HTTP 嗅探、回环防护、CLI | 路由器（OpenWrt）上透明分流，没有 DNS 泄漏。**状态**：TPROXY（selective / all）、策略路由（netlink）、FakeIP + 分流 DNS、DNS 劫持、canary、SNI/Host 嗅探、防回环、`capture down`、L2 DoH/DoT/DoQ 封堵、L3 ECH 剥离、L4 规则域名预解析与应答学习、L0 可见度统计都已实现，并在网络命名空间里做了集成测试；UDP 代理、L4 的 `outer_sni` 规则、L5 浏览器策略尚未实现；验收项需要真实路由器，尚未完成 |
+| M1 Linux | nft TPROXY、FakeIP DNS、SNI/HTTP 嗅探、回环防护、CLI | 路由器（OpenWrt）上透明分流，没有 DNS 泄漏。**状态**：TPROXY（selective / all）、策略路由（netlink）、FakeIP + 分流 DNS、DNS 劫持、canary、SNI/Host 嗅探、防回环、`capture down`、L2 DoH/DoT/DoQ 封堵、L3 ECH 剥离、L4 规则域名预解析与应答学习、L0 可见度统计都已实现，并在网络命名空间里做了集成测试；L4 的 `outer_sni` 规则已实现（外层 SNI 只由 `outer_sni` 匹配，不再当作域名）；UDP 代理、L5 浏览器策略尚未实现；验收项需要真实路由器，尚未完成 |
 | M2 桌面 | Windows Wintun、macOS utun、与系统 Tailscale 共存 | 官方客户端保持 tailnet 访问，tailproxy 负责出口分流 |
 | M3 移动 | Android VpnService、iOS NEPacketTunnelProvider（gomobile） | 单个 VPN 同时提供 tailnet 访问和多出口分流 |
 | M4 生态 | Rule Provider、出口组健康检查、指标、GUI | —。**已有**：`tpctl` 命令行（内置官方 tailscale CLI，操作 tailproxy 主节点，本机无需另装 tailscale；`tpctl schema` 输出配置 JSON Schema、OpenAPI、命令清单） |

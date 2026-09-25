@@ -94,6 +94,10 @@ func TestRuleTestEndpoint(t *testing.T) {
 		{`{}`, "", 400},
 		{`{"ip":"nope"}`, "", 400},
 		{`{"domain":"a","extra":1}`, "", 400},
+		{`{"outer_sni":"cloudflare-ech.com"}`, "direct", 200},
+		// A draft with an outer_sni rule; the outer name never matches domain rules.
+		{`{"outer_sni":"x.cloudflare-ech.com","rules":[{"domain_suffix":["cloudflare-ech.com"],"egress":"jp"},{"outer_sni":["cloudflare-ech.com"],"egress":"us"}]}`, "us", 200},
+		{`{"domain":"cloudflare-ech.com","rules":[{"outer_sni":["cloudflare-ech.com"],"egress":"us"}]}`, "direct", 200},
 	}
 	for _, tt := range tests {
 		rec := do(t, h, "POST", "/api/v1/rules/test", tt.body, nil)

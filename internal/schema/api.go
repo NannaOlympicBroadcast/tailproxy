@@ -84,15 +84,16 @@ func API() map[string]any {
 				map[string]any{"requestBody": jsonBody(map[string]any{"type": "object", "required": []string{"revision", "rules"}, "additionalProperties": false,
 					"properties": map[string]any{"revision": revision, "rules": map[string]any{"type": "array", "items": ruleItem}}})}),
 		},
-		"/api/v1/rules/test": map[string]any{"post": op("testRules", "测试域名 / IP / 端口命中哪条规则；带 rules 时用未保存的草稿测试",
+		"/api/v1/rules/test": map[string]any{"post": op("testRules", "测试域名 / IP / ECH 外层 SNI / 端口命中哪条规则；带 rules 时用未保存的草稿测试",
 			errs(ok("命中结果", map[string]any{"type": "object", "properties": map[string]any{
 				"rule_index": map[string]any{"type": "integer", "description": "-1 表示未命中（隐式 final: direct）"},
 				"target":     map[string]any{"type": "string"}, "implicit": map[string]any{"type": "boolean"}, "reason": map[string]any{"type": "string"}}}),
 				map[string]string{"400": "参数或草稿规则无效"}),
 			map[string]any{"requestBody": jsonBody(map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{
 				"domain": map[string]any{"type": "string"}, "ip": map[string]any{"type": "string"},
-				"port":  map[string]any{"type": "integer", "minimum": 0, "maximum": 65535},
-				"rules": map[string]any{"type": "array", "items": ruleItem}}})})},
+				"outer_sni": map[string]any{"type": "string", "description": "ECH 外层 SNI，只有 outer_sni 条件匹配它"},
+				"port":      map[string]any{"type": "integer", "minimum": 0, "maximum": 65535},
+				"rules":     map[string]any{"type": "array", "items": ruleItem}}})})},
 		"/metrics": map[string]any{"get": op("getMetrics", "Prometheus 文本格式指标", map[string]any{
 			"200": map[string]any{"description": "指标", "content": map[string]any{"text/plain": map[string]any{"schema": map[string]any{"type": "string"}}}},
 			"401": map[string]any{"description": "缺少或错误的访问令牌"},

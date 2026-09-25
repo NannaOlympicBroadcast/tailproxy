@@ -515,6 +515,8 @@ type ruleTestRequest struct {
 	Domain string `json:"domain"`
 	IP     string `json:"ip"`
 	Port   uint16 `json:"port"`
+	// OuterSNI is the outer name of an ECH ClientHello (outer_sni rules).
+	OuterSNI string `json:"outer_sni"`
 	// Rules, when set, tests against this unsaved draft instead of the
 	// running rules. The draft is validated against the current egress list.
 	Rules *[]config.Rule `json:"rules,omitempty"`
@@ -528,7 +530,7 @@ func (s *Server) handleRuleTest(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
 		return
 	}
-	q := rule.Query{Domain: req.Domain, Port: req.Port}
+	q := rule.Query{Domain: req.Domain, Port: req.Port, OuterSNI: req.OuterSNI}
 	if ipStr := strings.TrimSpace(req.IP); ipStr != "" {
 		ip, err := netip.ParseAddr(ipStr)
 		if err != nil {
@@ -537,8 +539,8 @@ func (s *Server) handleRuleTest(w http.ResponseWriter, r *http.Request) {
 		}
 		q.IP = ip
 	}
-	if strings.TrimSpace(q.Domain) == "" && !q.IP.IsValid() {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "domain or ip is required"})
+	if strings.TrimSpace(q.Domain) == "" && !q.IP.IsValid() && strings.TrimSpace(q.OuterSNI) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "domain, ip or outer_sni is required"})
 		return
 	}
 	cfg, engine, _ := s.snapshot()

@@ -16,6 +16,9 @@ type Query struct {
 	Domain string
 	IP     netip.Addr
 	Port   uint16
+	// OuterSNI is the outer server name of an ECH ClientHello (the
+	// provider's public name). Only outer_sni conditions look at it.
+	OuterSNI string
 }
 
 // Result is the outcome of matching a Query.
@@ -26,6 +29,8 @@ type Result struct {
 	Target    string `json:"target"`
 	Implicit  bool   `json:"implicit"`
 	Reason    string `json:"reason"`
+	// ByOuterSNI is set when an outer_sni condition decided the match.
+	ByOuterSNI bool `json:"-"`
 }
 
 type compiled struct {
@@ -33,6 +38,7 @@ type compiled struct {
 	suffixes []string
 	keywords []string
 	prefixes []netip.Prefix
+	outerSNI []string
 	ports    map[uint16]bool
 	target   string
 	final    bool
@@ -72,6 +78,11 @@ func Compile(rules []config.Rule) (*Engine, error) {
 			}
 			c.prefixes = append(c.prefixes, prefix)
 		}
+		for _, s := range r.OuterSNI {
+			if s = strings.TrimPrefix(NormalizeDomain(s), "."); s != "" {
+				c.outerSNI = append(c.outerSNI, s)
+			}
+		}
 		if len(r.Port) > 0 {
 			c.ports = make(map[uint16]bool, len(r.Port))
 			for _, p := range r.Port {
@@ -94,6 +105,7 @@ func NormalizeDomain(d string) string {
 // Match returns the first rule matching q, or the implicit direct target.
 func (e *Engine) Match(q Query) Result {
 	domain := NormalizeDomain(q.Domain)
+	outer := NormalizeDomain(q.OuterSNI)
 	ip := q.IP.Unmap()
 	for i, r := range e.rules {
 		if r.final {
@@ -103,19 +115,23 @@ func (e *Engine) Match(q Query) Result {
 			continue
 		}
 		reason, ok := r.matchDest(domain, ip)
+		byOuter := false
 		if !ok {
-			continue
+			if reason, ok = r.matchOuterSNI(outer); !ok {
+				continue
+			}
+			byOuter = true
 		}
 		if r.ports != nil {
 			reason = strings.TrimPrefix(reason+fmt.Sprintf(" + port %d", q.Port), " + ")
 		}
-		return Result{RuleIndex: i, Target: r.target, Reason: reason}
+		return Result{RuleIndex: i, Target: r.target, Reason: reason, ByOuterSNI: byOuter}
 	}
 	return Result{RuleIndex: -1, Target: config.TargetDirect, Implicit: true, Reason: "no rule matched (implicit final: direct)"}
 }
 
 func (r *compiled) matchDest(domain string, ip netip.Addr) (string, bool) {
-	hasDest := r.exact != nil || len(r.suffixes) > 0 || len(r.keywords) > 0 || len(r.prefixes) > 0
+	hasDest := r.exact != nil || len(r.suffixes) > 0 || len(r.keywords) > 0 || len(r.prefixes) > 0 || len(r.outerSNI) > 0
 	if !hasDest {
 		return "", true // port-only rule
 	}
@@ -144,6 +160,19 @@ func (r *compiled) matchDest(domain string, ip netip.Addr) (string, bool) {
 	return "", false
 }
 
+// matchOuterSNI matches an ECH outer name against outer_sni by suffix.
+func (r *compiled) matchOuterSNI(outer string) (string, bool) {
+	if outer == "" {
+		return "", false
+	}
+	for _, s := range r.outerSNI {
+		if outer == s || strings.HasSuffix(outer, "."+s) {
+			return fmt.Sprintf("outer_sni %q", s), true
+		}
+	}
+	return "", false
+}
+
 // DomainMayRoute reports whether some connection to domain could match a
 // rule whose target is not direct (DESIGN §4.6, selective mode): the DNS
 // module hands out a FakeIP only for such names and answers the rest with
@@ -159,7 +188,7 @@ func (e *Engine) DomainMayRoute(domain string) bool {
 		}
 		hasDomainCond := r.exact != nil || len(r.suffixes) > 0 || len(r.keywords) > 0
 		if !hasDomainCond {
-			if len(r.prefixes) == 0 && r.target != config.TargetDirect {
+			if len(r.prefixes) == 0 && len(r.outerSNI) == 0 && r.target != config.TargetDirect {
 				return true // port-only rule: some port goes elsewhere
 			}
 			continue
