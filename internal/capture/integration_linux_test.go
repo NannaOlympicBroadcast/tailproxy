@@ -13,6 +13,8 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -705,7 +707,10 @@ func netnsUDPTest(t *testing.T) {
 	}
 	// A QUIC Initial to a routed address: its SNI (example.com) wins over
 	// the ip_cidr rule, so the flow goes to the relay (no UDP) instead.
-	initial, err := os.ReadFile("../sniff/testdata/rfc9001-client-initial.hex")
+	// CI runs the compiled test binary from the repository root: find the
+	// file relative to this source file, not the working directory.
+	_, self, _, _ := runtime.Caller(0)
+	initial, err := os.ReadFile(filepath.Join(filepath.Dir(self), "..", "sniff", "testdata", "rfc9001-client-initial.hex"))
 	if err != nil {
 		t.Fatal(err)
 	}
