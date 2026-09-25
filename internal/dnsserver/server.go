@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -406,11 +407,13 @@ func (s *Server) exchange(ctx context.Context, upstream string, q []byte, tcp bo
 // (or empty) reads the system resolvers, otherwise a comma- or
 // space-separated list of IP[:port]. Loopback resolvers are dropped for
 // "system": they are usually a local stub (systemd-resolved, dnsmasq) whose
-// own upstream queries capture sends back here, which would loop.
-func ParseUpstreams(spec string) ([]string, error) {
+// own upstream queries capture sends back here, which would loop. So are
+// the exclude addresses (TUN mode's own DNS address, which system DNS
+// points at while tailproxy runs).
+func ParseUpstreams(spec string, exclude ...netip.Addr) ([]string, error) {
 	spec = strings.TrimSpace(spec)
 	if spec == "" || spec == "system" {
-		ups := systemResolvers()
+		ups := systemResolvers(exclude)
 		if len(ups) == 0 {
 			return nil, errors.New("dns.direct_upstream: system: no non-loopback resolver found in /run/systemd/resolve/resolv.conf or /etc/resolv.conf; set it explicitly, e.g. \"223.5.5.5, 119.29.29.29\"")
 		}
@@ -438,7 +441,7 @@ func ParseUpstreams(spec string) ([]string, error) {
 // file names the real upstreams behind the 127.0.0.53 stub.
 var resolvConfPaths = []string{"/run/systemd/resolve/resolv.conf", "/etc/resolv.conf"}
 
-func systemResolvers() []string {
+func systemResolvers(exclude []netip.Addr) []string {
 	for _, p := range resolvConfPaths {
 		data, err := os.ReadFile(p)
 		if err != nil {
@@ -451,7 +454,7 @@ func systemResolvers() []string {
 				continue
 			}
 			ip, err := netip.ParseAddr(f[1]) // keeps a zone (fe80::1%eth0)
-			if err != nil || ip.IsLoopback() || ip.IsUnspecified() {
+			if err != nil || ip.IsLoopback() || ip.IsUnspecified() || slices.Contains(exclude, ip) {
 				continue
 			}
 			out = append(out, netip.AddrPortFrom(ip, 53).String())

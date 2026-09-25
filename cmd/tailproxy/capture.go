@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -49,6 +48,7 @@ type captureRuntime struct {
 	tunRouter *tunstack.Router
 	tunName   string
 	tunDNS    netip.Addr
+	sysDNS    string // system DNS state, for the panel
 	rules     func() *rule.Engine
 	// DoH block lists (nil when dns.anti_bypass.block_doh is off).
 	doh      *antibypass.Lists
@@ -74,7 +74,7 @@ func setupCapture(cfg *config.Config, rules func() *rule.Engine, router *proxy.R
 	tunMode := cfg.Capture.Mode == config.CaptureTUN
 	switch {
 	case tunMode && !tunstack.Supported:
-		return nil, errors.New("capture.mode tun is only implemented on Linux so far; use capture.socks_listen on this system")
+		return nil, errors.New("capture.mode tun is implemented on Linux, macOS and Windows only; use capture.socks_listen on this system")
 	case !tunMode && !capture.Supported:
 		return nil, errors.New("capture.mode tproxy is only supported on Linux; use capture.socks_listen on this system")
 	}
@@ -107,7 +107,16 @@ func setupCapture(cfg *config.Config, rules func() *rule.Engine, router *proxy.R
 		fakePrefixes = c.pool.Prefixes()
 	}
 
-	upstreams, err := dnsserver.ParseUpstreams(cfg.DNS.DirectUpstream)
+	var notUpstream []netip.Addr
+	if tunMode {
+		// Rules, and system DNS still pointing at the stack, left by a
+		// crash; that address is never an upstream either.
+		if err := tunstack.Cleanup(); err != nil {
+			log.Printf("tailproxy: %v", err)
+		}
+		notUpstream = append(notUpstream, cfg.Capture.TUNDNSAddr())
+	}
+	upstreams, err := dnsserver.ParseUpstreams(cfg.DNS.DirectUpstream, notUpstream...)
 	if err != nil {
 		return nil, err
 	}
@@ -178,7 +187,6 @@ func setupCapture(cfg *config.Config, rules func() *rule.Engine, router *proxy.R
 	}
 
 	if tunMode {
-		tunstack.Cleanup() // policy rules left by a crash
 		addr, _ := netip.ParsePrefix(cfg.Capture.TUNAddress)
 		c.tunName, c.tunDNS = cfg.Capture.TUNName, cfg.Capture.TUNDNSAddr()
 		if runtime.GOOS == "darwin" && !strings.HasPrefix(c.tunName, "utun") {
@@ -209,6 +217,16 @@ func setupCapture(cfg *config.Config, rules func() *rule.Engine, router *proxy.R
 		c.opts = capture.Options{Scope: cfg.Capture.Scope, FakeIP: fakePrefixes}
 		if err := c.apply(); err != nil {
 			return nil, err
+		}
+		c.sysDNS = "未修改（capture.tun_system_dns: off）"
+		if cfg.Capture.TUNSystemDNS != config.SystemDNSOff {
+			if err := c.tunRouter.SetSystemDNS(c.tunDNS); err != nil {
+				c.sysDNS = "设置失败，需手动指向 " + c.tunDNS.String()
+				log.Printf("tailproxy: %v; point system DNS at %s by hand (see README, TUN mode)", err, c.tunDNS)
+			} else {
+				c.sysDNS = "已指向 " + c.tunDNS.String() + "，退出时恢复"
+				log.Printf("tailproxy: system DNS -> %s (restored on exit)", c.tunDNS)
+			}
 		}
 		return c, nil
 	}
@@ -408,11 +426,14 @@ func (c *captureRuntime) refreshDoH(ctx context.Context) {
 // Close removes the rules (or the TUN device) and saves the FakeIP table.
 func (c *captureRuntime) Close() {
 	if c.tun != nil || c.tunRouter != nil {
+		// System DNS first, while the device is still there.
+		if c.tunRouter != nil {
+			if err := c.tunRouter.Close(); err != nil {
+				log.Printf("tailproxy: %v", err)
+			}
+		}
 		if c.tun != nil {
 			c.tun.Close() // the device goes, and its routes with it
-		}
-		if c.tunRouter != nil {
-			c.tunRouter.Close()
 		}
 	} else if err := capture.Teardown(); err != nil {
 		log.Printf("tailproxy: capture teardown: %v", err)
@@ -438,7 +459,7 @@ func (c *captureRuntime) Close() {
 func (c *captureRuntime) Summary() (capState, capDetail, dnsState, dnsDetail string) {
 	capDetail = fmt.Sprintf("TPROXY :%d，范围 %s", c.opts.TProxyPort, c.opts.Scope)
 	if c.tun != nil {
-		capDetail = fmt.Sprintf("TUN %s，范围 %s，DNS %s", c.tunName, c.opts.Scope, c.tunDNS)
+		capDetail = fmt.Sprintf("TUN %s，范围 %s，DNS %s（系统 DNS %s）", c.tunName, c.opts.Scope, c.tunDNS, c.sysDNS)
 	}
 	if c.udpIn != nil {
 		capDetail += fmt.Sprintf("；UDP 代理，活动流 %d", c.udpIn.Flows())
@@ -479,20 +500,30 @@ func (c *captureRuntime) Summary() (capState, capDetail, dnsState, dnsDetail str
 }
 
 // cmdCapture implements `tailproxy capture down`: remove leftover rules
-// after a crash (also run by the systemd unit's ExecStopPost).
+// after a crash (also run by the systemd unit's ExecStopPost), and put back
+// system DNS that a crashed TUN run left pointing at its stack (macOS).
 func cmdCapture(args []string) error {
 	if len(args) != 1 || args[0] != "down" {
-		return errors.New("用法：tailproxy capture down   # 删除 tailproxy 的 nftables 表和策略路由（崩溃后恢复网络用）")
+		return errors.New("用法：tailproxy capture down   # 删除 tailproxy 的 nftables 表和策略路由、恢复系统 DNS（崩溃后恢复网络用）")
 	}
-	if !capture.Supported {
+	if !capture.Supported && !tunstack.Supported {
 		return nil
 	}
-	if os.Geteuid() != 0 {
-		return errors.New("tailproxy capture down 需要 root")
+	if !isAdmin() {
+		return errors.New("tailproxy capture down 需要 root / 管理员权限")
 	}
-	if err := errors.Join(capture.Teardown(), tunstack.Cleanup()); err != nil {
+	var errs []error
+	if capture.Supported {
+		errs = append(errs, capture.Teardown())
+	}
+	errs = append(errs, tunstack.Cleanup())
+	if err := errors.Join(errs...); err != nil {
 		return err
 	}
-	fmt.Println("已删除 nftables 表 inet " + capture.TableName + " 和策略路由（fwmark " + strconv.Itoa(capture.RouteMark) + " → table " + strconv.Itoa(capture.RouteTable) + "）")
+	if capture.Supported {
+		fmt.Println("已删除 nftables 表 inet " + capture.TableName + " 和策略路由（fwmark " + strconv.Itoa(capture.RouteMark) + " → table " + strconv.Itoa(capture.RouteTable) + "）")
+	} else {
+		fmt.Println("已清理 TUN 模式的残留设置（系统 DNS）")
+	}
 	return nil
 }

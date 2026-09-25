@@ -33,6 +33,7 @@ type Router struct {
 
 	mu      sync.Mutex
 	applied map[netip.Prefix]bool
+	dnsSet  bool
 }
 
 // Supported reports whether TUN capture can be set up on this system.
@@ -114,8 +115,12 @@ func (r *Router) SetRoutes(routes []netip.Prefix) error {
 	return errors.Join(errs...)
 }
 
-// Close removes the policy rules. The device's routes go with the device.
-func (r *Router) Close() error { return rules(false) }
+// Close reverts system DNS and removes the policy rules. The device's
+// routes go with the device.
+func (r *Router) Close() error {
+	r.revertDNS()
+	return rules(false)
+}
 
 func routeMsg(p netip.Prefix, ifindex int) *rtnetlink.RouteMessage {
 	fam := uint8(unix.AF_INET)

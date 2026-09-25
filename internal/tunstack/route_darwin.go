@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/netip"
 	"os/exec"
-	"strings"
 	"sync"
 
 	"github.com/tailscale/wireguard-go/tun"
@@ -24,14 +23,6 @@ type Router struct {
 
 	mu      sync.Mutex
 	applied map[netip.Prefix]bool
-}
-
-func run(args ...string) error {
-	out, err := exec.Command(args[0], args[1:]...).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
-	}
-	return nil
 }
 
 // NewRouter gives the utun device addr (e.g. 172.19.0.1/30) and brings it
@@ -94,8 +85,9 @@ func (r *Router) SetRoutes(routes []netip.Prefix) error {
 	return errors.Join(errs...)
 }
 
-// Close is a no-op: the routes go with the utun device.
-func (r *Router) Close() error { return nil }
+// Close restores system DNS if SetSystemDNS changed it; the routes go
+// with the utun device.
+func (r *Router) Close() error { return restoreSystemDNS() }
 
-// Cleanup is a no-op on macOS (no policy rules).
-func Cleanup() error { return nil }
+// Cleanup restores system DNS left pointing at the stack by a crash.
+func Cleanup() error { return restoreSystemDNS() }

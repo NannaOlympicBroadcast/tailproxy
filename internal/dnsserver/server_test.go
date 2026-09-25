@@ -219,6 +219,11 @@ func TestParseUpstreams(t *testing.T) {
 	if got, err := ParseUpstreams("system"); err != nil || len(got) != 2 || got[0] != "10.0.0.2:53" || got[1] != "[fe80::1%eth0]:53" {
 		t.Fatalf("system: %v %v", got, err)
 	}
+	// TUN mode's DNS address (system DNS points there) is never an upstream.
+	os.WriteFile(real, []byte("nameserver 172.19.0.2\nnameserver 10.0.0.2\n"), 0o644)
+	if got, err := ParseUpstreams("system", netip.MustParseAddr("172.19.0.2")); err != nil || len(got) != 1 || got[0] != "10.0.0.2:53" {
+		t.Fatalf("system without the TUN DNS: %v %v", got, err)
+	}
 }
 
 func TestStripECHAndObserve(t *testing.T) {

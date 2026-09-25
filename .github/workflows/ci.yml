@@ -28,6 +28,8 @@ jobs:
         run: |
           go test -c -o tunstack.test ./internal/tunstack/
           sudo ./tunstack.test -test.run TestTUNIntegration -test.v
+      - name: TUN system DNS (host namespace, systemd-resolved)
+        run: sudo TP_TUN_INTEGRATION=1 ./tunstack.test -test.run TestTUNSystemDNS -test.v
 
   windows:
     runs-on: windows-latest

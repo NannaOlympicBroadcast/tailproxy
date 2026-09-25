@@ -24,6 +24,7 @@ type Router struct {
 
 	mu      sync.Mutex
 	applied map[netip.Prefix]bool
+	dnsSet  bool
 }
 
 // NewRouter gives the Wintun adapter addr (e.g. 172.19.0.1/30).
@@ -74,8 +75,11 @@ func (r *Router) SetRoutes(routes []netip.Prefix) error {
 	return errors.Join(errs...)
 }
 
-// Close is a no-op: the routes go with the adapter.
-func (r *Router) Close() error { return nil }
+// Close clears the adapter's DNS settings; the routes go with the adapter.
+func (r *Router) Close() error {
+	r.revertDNS()
+	return nil
+}
 
 // Cleanup is a no-op on Windows (no policy rules).
 func Cleanup() error { return nil }

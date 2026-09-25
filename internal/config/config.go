@@ -175,7 +175,17 @@ type Capture struct {
 	// subnet answers DNS (default tailproxy0, 172.19.0.1/30 -> 172.19.0.2).
 	TUNName    string `yaml:"tun_name,omitempty" json:"tun_name,omitempty"`
 	TUNAddress string `yaml:"tun_address,omitempty" json:"tun_address,omitempty"`
+	// TUNSystemDNS: "auto" (default) points the system resolver at the
+	// stack's DNS address while running and restores it on exit; "off"
+	// leaves system DNS alone.
+	TUNSystemDNS string `yaml:"tun_system_dns,omitempty" json:"tun_system_dns,omitempty"`
 }
+
+// capture.tun_system_dns values.
+const (
+	SystemDNSAuto = "auto"
+	SystemDNSOff  = "off"
+)
 
 // UDP modes (capture.udp).
 const (
@@ -258,6 +268,9 @@ func (c *Config) applyDefaults() {
 		}
 		if c.Capture.TUNAddress == "" {
 			c.Capture.TUNAddress = DefaultTUNAddress
+		}
+		if c.Capture.TUNSystemDNS == "" {
+			c.Capture.TUNSystemDNS = SystemDNSAuto
 		}
 		if c.Capture.Scope == "" {
 			c.Capture.Scope = "selective"
@@ -428,6 +441,11 @@ func (c *Config) validateCapture(egressNames map[string]bool) []error {
 			case !p.Addr().Is4() || p.Bits() > 30:
 				errs = append(errs, fmt.Errorf("capture.tun_address %s: want an IPv4 prefix of /30 or larger (the next address answers DNS)", c.Capture.TUNAddress))
 			}
+		}
+		switch c.Capture.TUNSystemDNS {
+		case "", SystemDNSAuto, SystemDNSOff:
+		default:
+			errs = append(errs, fmt.Errorf("capture.tun_system_dns %q: want auto or off", c.Capture.TUNSystemDNS))
 		}
 	default:
 		errs = append(errs, fmt.Errorf("capture.mode %q: want auto, socks, tproxy or tun", c.Capture.Mode))

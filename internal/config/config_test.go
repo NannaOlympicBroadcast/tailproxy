@@ -100,13 +100,14 @@ func TestCaptureConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mode tun: %v", err)
 	}
-	if tunCfg.Capture.TUNName != DefaultTUNName || tunCfg.Capture.TUNDNSAddr().String() != "172.19.0.2" || tunCfg.Capture.Scope != "selective" {
+	if tunCfg.Capture.TUNName != DefaultTUNName || tunCfg.Capture.TUNDNSAddr().String() != "172.19.0.2" || tunCfg.Capture.Scope != "selective" || tunCfg.Capture.TUNSystemDNS != SystemDNSAuto {
 		t.Fatalf("tun defaults: %+v dns %s", tunCfg.Capture, tunCfg.Capture.TUNDNSAddr())
 	}
 	for _, bad := range []string{
 		"capture: {mode: tun, scope: all}\nrules: []\n",
 		"capture: {mode: tun, tun_address: 172.19.0.1/31}\nrules: []\n",
 		"capture: {mode: tun, tun_address: 'fd00::1/64'}\nrules: []\n",
+		"capture: {mode: tun, tun_system_dns: yes}\nrules: []\n",
 		"capture: {mode: magic}\nrules: []\n",
 		"capture: {mode: tproxy, scope: some}\nrules: []\n",
 		"capture: {mode: tproxy, udp: always}\nrules: []\n",
@@ -119,6 +120,9 @@ func TestCaptureConfig(t *testing.T) {
 		if _, err := Parse([]byte(bad)); err == nil {
 			t.Errorf("accepted: %s", bad)
 		}
+	}
+	if c, err := Parse([]byte("capture: {mode: tun, tun_system_dns: 'off'}\nrules: []\n")); err != nil || c.Capture.TUNSystemDNS != SystemDNSOff {
+		t.Errorf("tun_system_dns off: %v", err)
 	}
 	if _, err := Parse([]byte("egress: [{name: us, exit_node: a}]\ndns: {unknown_domain: 'egress:us'}\nrules: []\n")); err != nil {
 		t.Errorf("egress:us rejected: %v", err)

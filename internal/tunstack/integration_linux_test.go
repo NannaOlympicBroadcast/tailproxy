@@ -44,6 +44,29 @@ func TestTUNIntegration(t *testing.T) {
 	netnsTUN(t)
 }
 
+// TestTUNSystemDNS runs the scenario in the host namespace, where
+// systemd-resolved runs, and points system DNS at the stack. It changes
+// host routing and DNS for a moment, so it only runs when
+// TP_TUN_INTEGRATION=1 (CI).
+func TestTUNSystemDNS(t *testing.T) {
+	if os.Getenv("TP_TUN_INTEGRATION") != "1" {
+		t.Skip("set TP_TUN_INTEGRATION=1 (needs root and systemd-resolved)")
+	}
+	if err := exec.Command("resolvectl", "status").Run(); err != nil {
+		t.Skipf("systemd-resolved not available: %v", err)
+	}
+	tunScenario(t, "tptest2", true)
+}
+
+// systemDNSSnapshot is resolved's per-link DNS servers.
+func systemDNSSnapshot(t *testing.T) string {
+	out, err := exec.Command("resolvectl", "dns").CombinedOutput()
+	if err != nil {
+		t.Fatalf("resolvectl dns: %v: %s", err, out)
+	}
+	return string(out)
+}
+
 func netnsTUN(t *testing.T) {
 	logf, done := testLogf(t)
 	defer done()
@@ -59,7 +82,7 @@ func netnsTUN(t *testing.T) {
 	}
 	conn.Close()
 
-	tunScenario(t, "tptest0")
+	tunScenario(t, "tptest0", false)
 
 	// capture.udp: block — a second device whose stack refuses UDP: the
 	// kernel turns its ICMP port unreachable into ECONNREFUSED at once.

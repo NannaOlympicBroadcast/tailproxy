@@ -73,9 +73,11 @@ func testLogf(t *testing.T) (logf func(string, ...any), done func()) {
 
 // tunScenario creates a real TUN device named devName ("utun" on macOS
 // picks a free utunN), routes the FakeIP pool and the stack's DNS address
-// into it, and checks DNS, HTTP and UDP through it to the egress. It needs
-// root / administrator rights.
-func tunScenario(t *testing.T, devName string) {
+// into it, and checks DNS, HTTP and UDP through it to the egress. With
+// systemDNS it then points system DNS at the stack, resolves through the
+// system resolver and checks the settings are restored. It needs root /
+// administrator rights.
+func tunScenario(t *testing.T, devName string, systemDNS bool) {
 	logf, done := testLogf(t)
 	defer done()
 	// Origins: HTTP echoing the Host header, and UDP echo.
@@ -181,4 +183,34 @@ func tunScenario(t *testing.T, devName string) {
 	}
 	t.Logf("egress saw: %s", seen)
 
+	if !systemDNS {
+		return
+	}
+	before := systemDNSSnapshot(t)
+	if err := rt.SetSystemDNS(netip.MustParseAddr("172.19.0.2")); err != nil {
+		t.Fatal(err)
+	}
+	// A fresh name per attempt: a negative answer cached before the
+	// change must not hide the new resolver.
+	deadline := time.Now().Add(20 * time.Second)
+	for i := 0; ; i++ {
+		name := fmt.Sprintf("sys%d.egress.test.", i)
+		lctx, lcancel := context.WithTimeout(ctx, 3*time.Second)
+		got, err := net.DefaultResolver.LookupNetIP(lctx, "ip4", name)
+		lcancel()
+		if err == nil && len(got) > 0 && pool.Contains(got[0]) {
+			t.Logf("system resolver: %s -> %s via the stack", name, got[0])
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("system resolver after SetSystemDNS: %s -> %v %v", name, got, err)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if err := rt.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if after := systemDNSSnapshot(t); after != before {
+		t.Fatalf("system DNS not restored:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
 }
