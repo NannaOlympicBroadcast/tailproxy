@@ -332,7 +332,7 @@ rules:
 |---|---|---|
 | M0 PoC | 两个 tsnet 槽位加 SOCKS5 入口，支持 keyword/CIDR 规则 | 通过两个槽位访问 IP 回显服务，返回的是两个不同出口的公网 IP。**状态：已验收（2026-09-24）**：在真实 tailnet 上，同一客户端经中国、美国两个出口分别得到 106.52.30.242 和 186.244.245.39（出口节点和中继两种方式都验证过，见 README） |
 | M1 Linux | nft TPROXY、FakeIP DNS、SNI/HTTP 嗅探、回环防护、CLI | 路由器（OpenWrt）上透明分流，没有 DNS 泄漏。**状态**：TPROXY（selective / all）、策略路由（netlink）、FakeIP + 分流 DNS、DNS 劫持、canary、SNI/Host 嗅探、防回环、`capture down`、L2 DoH/DoT/DoQ 封堵、L3 ECH 剥离、L4 规则域名预解析与应答学习、L0 可见度统计都已实现，并在网络命名空间里做了集成测试；L4 的 `outer_sni` 规则已实现（外层 SNI 只由 `outer_sni` 匹配，不再当作域名）；UDP 代理已实现（`capture.udp: proxy`，经出口节点 / 直连，中继不承载 UDP；QUIC Initial SNI 嗅探支持 v1 / v2，跨数据报合并 ClientHello），在网络命名空间里做了集成测试；L5 浏览器策略尚未实现；验收项需要真实路由器，尚未完成 |
-| M2 桌面 | Windows Wintun、macOS utun、与系统 Tailscale 共存 | 官方客户端保持 tailnet 访问，tailproxy 负责出口分流。**状态**：TUN 引擎（`internal/tunstack`：gVisor netstack + wireguard-go `tun.Device`，TCP/UDP 交给与 TPROXY 相同的入口，协议栈内 DNS）已实现，跨平台编译；`capture.mode: tun` 已在三个平台接入：Linux 用独立路由表 + 绕行标记优先查 main 表；macOS utun 用 ifconfig/route，防回环用 `IP_BOUND_IF` 绑定默认路由网卡；Windows Wintun 用 IP Helper API，防回环用 `IP_UNICAST_IF`。三个平台都在 CI 里用真实 TUN 设备跑通集成测试。尚未实现：自动设置系统 DNS、与系统 Tailscale 共存的实测、Windows 默认路由冲突（R5）回归 |
+| M2 桌面 | Windows Wintun、macOS utun、与系统 Tailscale 共存 | 官方客户端保持 tailnet 访问，tailproxy 负责出口分流。**状态**：TUN 引擎（`internal/tunstack`：gVisor netstack + wireguard-go `tun.Device`，TCP/UDP 交给与 TPROXY 相同的入口，协议栈内 DNS）已实现，跨平台编译；`capture.mode: tun` 已在三个平台接入：Linux 用独立路由表 + 绕行标记优先查 main 表；macOS utun 用 ifconfig/route，防回环用 `IP_BOUND_IF` 绑定默认路由网卡；Windows Wintun 用 IP Helper API，防回环用 `IP_UNICAST_IF`。三个平台都在 CI 里用真实 TUN 设备跑通集成测试。系统 DNS 自动设置与恢复（`capture.tun_system_dns`）：Linux systemd-resolved 仅路由域 `~.`（据 systemd-resolved 文档，其他网卡不再参与这些查询，除非它们也配置了 `~.`）[来源 S52]，macOS networksetup（同 wg-quick）[来源 S53]，Windows 网卡 DNS + 跃点数 0（同 wireguard-windows）[来源 S54]，三个平台在 CI 中用系统解析器验证。尚未实现：与系统 Tailscale 共存的实测（其 MagicDNS 若也设 `~.` 会并行查询）、Windows 默认路由冲突（R5）回归 |
 | M3 移动 | Android VpnService、iOS NEPacketTunnelProvider（gomobile） | 单个 VPN 同时提供 tailnet 访问和多出口分流 |
 | M4 生态 | Rule Provider、出口组健康检查、指标、GUI | —。**已有**：`tpctl` 命令行（内置官方 tailscale CLI，操作 tailproxy 主节点，本机无需另装 tailscale；`tpctl schema` 输出配置 JSON Schema、OpenAPI、命令清单） |
 
@@ -408,4 +408,7 @@ rules:
 | S49 | RFC 1929 Username/Password Authentication for SOCKS V5：https://www.rfc-editor.org/rfc/rfc1929 |
 | S50 | AWS EC2 – Access instance metadata（IMDS 地址 169.254.169.254）：https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instancedata-data-retrieval.html |
 | S51 | tailscale.com v1.102.4 源码 `net/netns/netns_linux.go`（`controlC`、`setBypassMark`、`UseSocketMark`）：https://github.com/tailscale/tailscale/blob/v1.102.4/net/netns/netns_linux.go |
+| S52 | systemd-resolved.service(8)（查询路由：仅路由域 `~.`）：https://www.freedesktop.org/software/systemd/man/latest/systemd-resolved.service.html |
+| S53 | wireguard-tools `src/wg-quick/darwin.bash`（`networksetup -getdnsservers/-setdnsservers` 保存与恢复）：https://github.com/WireGuard/wireguard-tools/blob/master/src/wg-quick/darwin.bash |
+| S54 | wireguard-windows v0.5.3 `tunnel/addressconfig.go`（`UseAutomaticMetric = false`、`Metric = 0`、`luid.SetDNS`）：https://git.zx2c4.com/wireguard-windows/tree/tunnel/addressconfig.go?h=v0.5.3 |
 | S27 | Apple TN3120 – Expected use cases for Network Extension packet tunnel providers：https://developer.apple.com/documentation/technotes/tn3120-expected-use-cases-for-network-extension-packet-tunnel-providers |

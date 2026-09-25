@@ -18,7 +18,7 @@
 | Linux 透明捕获（`capture.mode: tproxy`）：nftables TPROXY + 策略路由、FakeIP / 分流 DNS、SNI / HTTP Host 嗅探、DNS 劫持、防回环 | 已实现；在网络命名空间里做了端到端集成测试，**尚未在真实路由器 / OpenWrt 上验证** |
 | `tpctl` 本机命令行：管理 tailproxy + 内置官方 tailscale 客户端（操作主节点）+ schema | 已实现；Linux / macOS 走 Unix 套接字，Windows 走命名管道（由 CI 在真实 Windows 上验证） |
 | UDP 代理（Linux 透明捕获，`capture.udp: proxy`）：按规则经出口节点 / 直连转发 UDP（如 QUIC） | 已实现；网络命名空间集成测试覆盖，**尚未在真实路由器和出口节点上验证**；中继出口不承载 UDP；SOCKS5 UDP ASSOCIATE 未实现 |
-| TUN 模式（`capture.mode: tun`）：TUN 设备 + gVisor 用户态协议栈，路由 + 协议栈内 DNS | Linux / macOS（utun）/ Windows（Wintun）已实现，三个平台都在 GitHub Actions 上用真实 TUN 设备跑通集成测试（DNS→FakeIP、TCP、UDP 到出口）；**系统 DNS 需要手动指向协议栈内 DNS**；Windows 需要 `wintun.dll`；只支持 selective 范围；Android / iOS 未实现；尚未在真实桌面上长期使用 |
+| TUN 模式（`capture.mode: tun`）：TUN 设备 + gVisor 用户态协议栈，路由 + 协议栈内 DNS | Linux / macOS（utun）/ Windows（Wintun）已实现，三个平台都在 GitHub Actions 上用真实 TUN 设备跑通集成测试（DNS→FakeIP、TCP、UDP 到出口）；运行时自动把系统 DNS 指向协议栈内 DNS、退出时恢复（`capture.tun_system_dns`，CI 中三个平台都用系统解析器验证过）；Windows 需要 `wintun.dll`；只支持 selective 范围；Android / iOS 未实现；尚未在真实桌面上长期使用 |
 
 ## 启动与管理
 
@@ -286,6 +286,7 @@ capture:
   mode: tun
   tun_name: tailproxy0        # 默认
   tun_address: 172.19.0.1/30  # 默认；172.19.0.2 是协议栈内的 DNS
+  tun_system_dns: auto        # 默认：运行时把系统 DNS 指向 172.19.0.2，退出时恢复；off 不改
   udp: proxy                  # 或 block（默认：UDP 立即回 ICMP 不可达）
 dns:
   mode: fakeip
@@ -296,15 +297,17 @@ dns:
   - **macOS**：设备名固定为 `utunN`（内核分配 N，`tun_name` 不以 `utun` 开头时忽略）；用 `ifconfig` / `route` 添加指向该接口的路由；tailproxy 自己的出站套接字用 `IP_BOUND_IF` 绑定到默认路由所在的物理网卡。
   - **Windows**：Wintun，需要把 [wintun.dll](https://www.wintun.net) 放在 `tailproxy.exe` 同一目录；地址和路由通过 IP Helper API 设置；出站套接字用 `IP_UNICAST_IF` 绑定到默认路由网卡。
   - macOS / Windows 上 tsnet 自己的套接字不经过这些路由（只把 FakeIP 池和规则网段路由进设备），所以不会被抓回来；访问回环地址的连接不绑定网卡。
-- **系统 DNS 需要手动指向 `172.19.0.2`**，tailproxy 目前不会自动修改系统 DNS：
-  - Linux（systemd-resolved）：`resolvectl dns tailproxy0 172.19.0.2; resolvectl domain tailproxy0 '~.'`
-  - macOS：`networksetup -setdnsservers Wi-Fi 172.19.0.2`（恢复：`networksetup -setdnsservers Wi-Fi empty`）
-  - Windows：`Set-DnsClientServerAddress -InterfaceAlias <物理网卡> -ServerAddresses 172.19.0.2`（恢复：`-ResetServerAddresses`）
+- **系统 DNS**（`capture.tun_system_dns: auto`，默认）：启动后把系统 DNS 指向 `172.19.0.2`，退出时恢复：
+  - Linux：通过 systemd-resolved 给 TUN 网卡设置 DNS 和仅路由域 `~.`（`resolvectl dns/domain`），所有没有被其他网卡更具体的路由域匹配的查询都发往 tailproxy；设备删除时设置随之消失。没有 systemd-resolved 时只打印警告，需要手动改 `/etc/resolv.conf`。
+  - macOS：用 `networksetup -setdnsservers` 修改每个网络服务的 DNS（与 wg-quick 的做法相同），原设置保存在 `/var/db/tailproxy/dns-backup.json`；崩溃后下次启动或 `sudo tailproxy capture down` 会恢复。
+  - Windows：给 Wintun 网卡设置 DNS 并把接口跃点数设为 0（与 wireguard-windows 相同），并清空 DNS 缓存；网卡删除时设置随之消失。CI 中设置后约 8 秒系统解析器才开始使用它，之前的查询仍走原来的 DNS。
+  - 设置失败时只打印警告，面板的捕获组件会显示状态；也可以设 `off` 手动配置，例如 Linux `resolvectl dns tailproxy0 172.19.0.2; resolvectl domain tailproxy0 '~.'`，macOS `networksetup -setdnsservers Wi-Fi 172.19.0.2`（恢复：`... Wi-Fi empty`），Windows `Set-DnsClientServerAddress -InterfaceAlias <物理网卡> -ServerAddresses 172.19.0.2`（恢复：`-ResetServerAddresses`）。
+  - `dns.direct_upstream: system` 会跳过 `172.19.0.2`，避免 tailproxy 把查询转发给自己；Windows 上没有 `/etc/resolv.conf`，需要显式填写上游，例如 `direct_upstream: "223.5.5.5, 119.29.29.29"`。
   - 也可以另设 `capture.dns_listen` 让 DNS 同时监听主机地址。
 - DoH 封堵只有域名部分生效（DNS 和 SNI），按 IP 封堵依赖 nftables，只在 tproxy 模式下有。
 - 停止时设备和路由随之删除；`tailproxy capture down` 也会清理残留的策略规则。
 
-**验证情况**：`internal/tunstack` 的单元测试用第二个用户态协议栈当客户端（不需要 root，所有系统上都跑）。`TestTUNIntegration` 创建真实 TUN 设备，经设备做 DNS（得到 FakeIP）、HTTP 和 UDP 到出口：Linux 在网络命名空间里跑，另外检查 `udp: block` 时内核 UDP 套接字立即得到 ECONNREFUSED、关闭后策略规则被删除；macOS（utun）和 Windows（Wintun 0.14.1）在 GitHub Actions 的 runner 上以 root / 管理员身份跑（`TP_TUN_INTEGRATION=1`）。`tailproxy run` 的 TUN 模式在 Linux 网络命名空间里手动跑通过（reject 规则、面板显示 TUN 入口）。还没有在真实桌面上长期使用；Windows 上与出口节点默认路由共存（DESIGN R5）尚未验证。
+**验证情况**：`internal/tunstack` 的单元测试用第二个用户态协议栈当客户端（不需要 root，所有系统上都跑）。`TestTUNIntegration` 创建真实 TUN 设备，经设备做 DNS（得到 FakeIP）、HTTP 和 UDP 到出口：Linux 在网络命名空间里跑，另外检查 `udp: block` 时内核 UDP 套接字立即得到 ECONNREFUSED、关闭后策略规则被删除；macOS（utun）和 Windows（Wintun 0.14.1）在 GitHub Actions 的 runner 上以 root / 管理员身份跑（`TP_TUN_INTEGRATION=1`）。系统 DNS：macOS、Windows 和 Ubuntu 主机命名空间（systemd-resolved，`TestTUNSystemDNS`）上设置后，用系统解析器解析规则域名得到 FakeIP，关闭后检查系统 DNS 设置与之前一致。`tailproxy run` 的 TUN 模式在 Linux 网络命名空间里手动跑通过（reject 规则、面板显示 TUN 入口）。还没有在真实桌面上长期使用；Windows 上与出口节点默认路由共存（DESIGN R5）尚未验证。
 
 **崩溃恢复**：进程异常退出时，规则可能会残留，导致被捕获的流量没有去处。可以用 `sudo tailproxy capture down` 立即删除。systemd 服务已经加了 `ExecStopPost=-tailproxy capture down`，服务停止或崩溃时会自动清理；下次启动时也会先清掉残留。
 
