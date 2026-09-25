@@ -3,6 +3,7 @@ package service
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -12,7 +13,8 @@ func TestStateAndTokenFiles(t *testing.T) {
 	if err := p.Ensure(); err != nil {
 		t.Fatal(err)
 	}
-	if info, _ := os.Stat(p.Dir); info.Mode().Perm() != 0o700 {
+	// Windows has no Unix permission bits (os reports 0777/0666).
+	if info, _ := os.Stat(p.Dir); runtime.GOOS != "windows" && info.Mode().Perm() != 0o700 {
 		t.Fatalf("dir mode %v", info.Mode().Perm())
 	}
 	if st, err := p.ReadState(); st != nil || err != nil {
@@ -25,7 +27,7 @@ func TestStateAndTokenFiles(t *testing.T) {
 	if err := os.WriteFile(p.Token, []byte("tok-123\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if info, _ := os.Stat(p.State); info.Mode().Perm() != 0o600 {
+	if info, _ := os.Stat(p.State); runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("state mode %v", info.Mode().Perm())
 	}
 	st, err := p.Running()

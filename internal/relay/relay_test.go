@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/socks5"
 )
@@ -67,8 +68,11 @@ func TestRelayRejectsBadTokenAndPrivateDestinations(t *testing.T) {
 	if _, err := connect(t, relay, "wrong-token-0123456789", "example.com", 443); !errors.Is(err, socks5.ErrAuthFailed) {
 		t.Fatalf("wrong token: %v", err)
 	}
-	if s.AuthFailures.Load() != 1 {
-		t.Fatal("auth failure not counted")
+	// The server counts the failure after the client already saw it.
+	for deadline := time.Now().Add(2 * time.Second); s.AuthFailures.Load() != 1; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("auth failures %d, want 1", s.AuthFailures.Load())
+		}
 	}
 	for _, host := range []string{"127.0.0.1", "169.254.169.254", "10.1.2.3", "100.98.60.52", "::1", "localhost"} {
 		_, err := connect(t, relay, testToken, host, 80)

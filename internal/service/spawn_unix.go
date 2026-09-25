@@ -48,7 +48,7 @@ func Spawn(exe string, args []string, logPath string, timeout time.Duration) (Re
 	cmd.Stderr = logf
 	cmd.Dir = "/"
 	cmd.ExtraFiles = []*os.File{pw} // fd 3 in the child
-	cmd.Env = append(os.Environ(), readyFDEnv+"=3")
+	cmd.Env = append(childEnv(), readyFDEnv+"=3")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		pw.Close()

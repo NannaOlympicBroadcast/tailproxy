@@ -7,7 +7,6 @@ import (
 	"log"
 	"net"
 	"net/netip"
-	"syscall"
 	"time"
 
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/socks5"
@@ -105,7 +104,7 @@ func replyCode(err error) byte {
 		return socks5.RepNotAllowed
 	case errors.As(err, &relayErr):
 		return relayErr.Code // pass a relay's answer through
-	case errors.Is(err, syscall.ECONNREFUSED):
+	case isConnRefused(err):
 		return socks5.RepConnRefused
 	case errors.As(err, &dnsErr):
 		return socks5.RepHostUnreachable

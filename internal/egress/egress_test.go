@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -240,7 +241,7 @@ func TestAuthKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := filepath.Join(dir, "tailscale.authkey")
-	if info, err := os.Stat(f); err != nil || info.Mode().Perm() != 0o600 {
+	if info, err := os.Stat(f); err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
 		t.Fatalf("key file: %v %v", info, err)
 	}
 	a := m.Account()

@@ -2,7 +2,7 @@ package service
 
 import (
 	"fmt"
-	"path/filepath"
+	"path"
 	"sort"
 	"strings"
 )
@@ -43,8 +43,9 @@ func Unit(o UnitOptions) (string, error) {
 	if !o.Relay {
 		paths["config"] = o.Config
 	}
+	// Unit files hold Linux paths: use path, not filepath (tests run on any OS).
 	for name, p := range paths {
-		if !filepath.IsAbs(p) {
+		if !path.IsAbs(p) {
 			return "", fmt.Errorf("systemd unit: %s path %q must be absolute", name, p)
 		}
 		if strings.ContainsAny(p, "\n\"\\%$") {
@@ -93,7 +94,7 @@ func Unit(o UnitOptions) (string, error) {
 		b.WriteString("TimeoutStartSec=90\nTimeoutStopSec=15\n")
 	} else {
 		// Optional secrets such as TS_AUTHKEY; "-" means the file may be absent.
-		fmt.Fprintf(&b, "EnvironmentFile=-%s\n", quoteArg(filepath.Join(o.StateDir, "tailproxy.env")))
+		fmt.Fprintf(&b, "EnvironmentFile=-%s\n", quoteArg(path.Join(o.StateDir, "tailproxy.env")))
 		fmt.Fprintf(&b, "ExecStart=%s run -c %s --state-dir %s\n", quoteArg(o.Exe), quoteArg(o.Config), quoteArg(o.StateDir))
 		// With capture.mode tproxy, a crash would leave nft rules sending
 		// traffic to a dead listener; remove them whenever the service
@@ -132,7 +133,7 @@ func Unit(o UnitOptions) (string, error) {
 func rwPaths(o UnitOptions) []string {
 	set := map[string]bool{o.StateDir: true}
 	if !o.Relay {
-		set[filepath.Dir(o.Config)] = true
+		set[path.Dir(o.Config)] = true
 	}
 	var out []string
 	for p := range set {

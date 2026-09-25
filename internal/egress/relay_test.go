@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -125,7 +126,7 @@ rules: []
 		t.Fatalf("token source %q", st0.TokenSource)
 	}
 	tokenPath := filepath.Join(dir, "relay", "vps.token")
-	if fi, err := os.Stat(tokenPath); err != nil || fi.Mode().Perm() != 0o600 {
+	if fi, err := os.Stat(tokenPath); err != nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600) {
 		t.Fatalf("token file: %v %v", fi, err)
 	}
 
