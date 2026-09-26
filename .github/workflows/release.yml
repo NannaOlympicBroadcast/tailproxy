@@ -3,14 +3,25 @@ name: release
 # A pushed tag vX.Y.Z builds tailproxy and tpctl for every supported
 # platform and publishes them, with checksums and the Cowork / Claude Code
 # plugin, as a GitHub Release. Tags with a suffix (v0.1.0-rc1) and 0.x
-# versions are published as pre-releases.
+# versions are published as pre-releases. Run it by hand (Actions > release
+# > Run workflow, on main) with a version to tag the selected commit and
+# release it in one go.
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to tag and release, e.g. v0.1.0"
+        required: true
 
 permissions:
   contents: write
+
+env:
+  # The tag being released: the pushed tag, or the version given by hand.
+  VERSION: ${{ inputs.version || github.ref_name }}
 
 jobs:
   release:
@@ -22,7 +33,8 @@ jobs:
           go-version: "1.26.6"
       - name: Check the tag matches the plugin version
         run: |
-          tag="${GITHUB_REF_NAME}"
+          tag="${VERSION}"
+          case "$tag" in v[0-9]*) ;; *) echo "version $tag must look like v1.2.3" >&2; exit 1 ;; esac
           want="${tag#v}"
           have="$(python3 -c 'import json; print(json.load(open("plugins/tailproxy/.claude-plugin/plugin.json"))["version"])')"
           if [ "$want" != "$have" ]; then
@@ -34,7 +46,7 @@ jobs:
       - name: Build
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME}"
+          version="${VERSION}"
           mkdir -p dist
           # os/arch[/variant]: GOARM for arm, GOMIPS=softfloat for OpenWrt MIPS.
           for target in linux/amd64 linux/arm64 linux/arm/7 linux/mips linux/mipsle linux/riscv64 \
@@ -65,7 +77,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME}"
+          version="${VERSION}"
           prerelease=""
           case "$version" in v0.*|*-*) prerelease="--prerelease" ;; esac
           cat > notes.md <<EOF
@@ -78,4 +90,5 @@ jobs:
 
           Licensed under MIT. Dependencies keep their own licenses (tailscale.com BSD-3-Clause, wireguard-go MIT, gVisor Apache-2.0, and others listed in go.mod).
           EOF
-          gh release create "$version" dist/* --title "tailproxy $version" --notes-file notes.md $prerelease
+          # For a run by hand the tag does not exist yet: create it at this commit.
+          gh release create "$version" dist/* --target "$GITHUB_SHA" --title "tailproxy $version" --notes-file notes.md $prerelease
