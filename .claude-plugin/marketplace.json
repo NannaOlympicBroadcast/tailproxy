@@ -1,0 +1,14 @@
+{
+  "name": "tailproxy",
+  "description": "tailproxy: route apps and sites through Tailscale exit nodes and VPS relays by rules, set up with an agent's help.",
+  "owner": {
+    "name": "NannaOlympicBroadcast"
+  },
+  "plugins": [
+    {
+      "name": "tailproxy",
+      "source": "./plugins/tailproxy",
+      "description": "Agent-guided install, configuration and troubleshooting of tailproxy (routing by rules through Tailscale exit nodes and relays)."
+    }
+  ]
+}

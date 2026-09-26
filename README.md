@@ -3,6 +3,17 @@
 基于 Tailscale 的跨平台透明代理插件：按域名关键词 / 后缀 / IP CIDR 规则，把流量分流到不同的 Tailscale 出口节点。
 
 - 设计文档：[docs/DESIGN.md](docs/DESIGN.md)
+- 许可证：[MIT](LICENSE)（依赖各自保留其许可证：tailscale.com BSD-3-Clause、wireguard-go MIT、gVisor Apache-2.0 等）
+
+## 安装
+
+- **下载发行版**：[Releases](https://github.com/NannaOlympicBroadcast/tailproxy/releases) 提供 `tailproxy_<版本>_<系统>_<架构>` 压缩包（Linux amd64 / arm64 / armv7 / mips / mipsle / riscv64，macOS amd64 / arm64，Windows amd64 / arm64），内含 `tailproxy`、`tpctl`、LICENSE、README 和配置示例；用 `SHA256SUMS` 校验。0.x 版本以预发布（pre-release）形式发布。
+- **让 Agent 引导配置（Cowork / Claude Code 插件）**：本仓库同时是一个插件市场。在 Cowork 或 claude.ai 的 Customize > Plugins 里添加市场 `NannaOlympicBroadcast/tailproxy` 并安装 `tailproxy` 插件（或上传发行版里的 `tailproxy-plugin_<版本>.zip`）；Claude Code 中：`/plugin marketplace add NannaOlympicBroadcast/tailproxy`，然后 `/plugin install tailproxy@tailproxy`。插件提供三个技能：
+  - `setup`：选择部署方式（本机 SOCKS5 / 本机 TUN / Linux 路由器 / VPS 中继）→ 下载并校验发行版 → 生成并用 `tailproxy check` 校验 config.yaml → 登录 Tailscale → 启动 → 验证各规则走到的出口；
+  - `rules`：用自然语言增改规则和出口，`tailproxy check` 校验后 `tpctl reload` 生效并逐条测试；
+  - `troubleshoot`：按 `tpctl status` / `egress list` / `conns` 和日志定位问题。
+  - 插件只包含技能（Cowork 不安装带顶层 `bin/` 的插件），命令在 Cowork 会话所在的电脑上执行，所以要让 Cowork 运行在需要配置的那台机器上；需要 root、修改系统或涉及密钥的步骤都会先征得同意，auth key 和中继令牌不经过对话。
+- **从源码构建**：见下一节。
 
 ## 当前进度
 
@@ -28,6 +39,7 @@
 
 ```sh
 go build -o tailproxy ./cmd/tailproxy
+./tailproxy check -c config.example.yaml   # 只校验配置，不启动
 ./tailproxy start -c config.example.yaml
 ```
 

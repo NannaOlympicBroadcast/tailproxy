@@ -225,9 +225,10 @@
 - **本地 API**：由 Web 面板端口（默认 7708）上的 REST 接口提供，所有请求都需要访问令牌。可以查询状态、配置、出口（含运行状态）、tailnet 设备、连接和规则；可以保存出口和规则、保存中继令牌和 auth key、重新加载配置。机器可读的描述由 `tpctl schema api`（OpenAPI 3.1）给出。
 - **主节点 LocalAPI**：tailproxy 运行时，把主节点的 tsnet LocalAPI（官方 tailscale CLI 使用的接口）转发到状态目录里的 Unix 套接字 `tailscaled.sock`（目录 700、套接字 600）。
 - **CLI**：
-  - `tailproxy start|run|stop|status|token|relay|service|capture`：进程生命周期、中继、systemd 和透明捕获清理。`start` 以后台进程运行，面板就绪后打印地址和令牌再退出前台；状态文件、日志和持久化的令牌文件放在 `~/.lighthousepro`。
+  - `tailproxy start|run|stop|status|token|relay|service|capture|check|doctor`：进程生命周期、中继、systemd、透明捕获清理、配置校验和浏览器策略（L5）。`start` 以后台进程运行，面板就绪后打印地址和令牌再退出前台；状态文件、日志和持久化的令牌文件放在 `~/.lighthousepro`。
   - `tpctl`：日常操作，包括状态、出口增删改、规则测试、设备、连接和重新加载。`tpctl ts …` 内置官方 tailscale CLI，操作上面的主节点，所以本机不需要另装 tailscale，也不会多出一台设备。`tpctl schema config|api|commands` 输出配置 JSON Schema（由结构体反射生成）、OpenAPI 文档和命令清单。
 - **扩展点**：① Rule Provider；② Capture 后端接口（`Capture` interface，新平台只需实现它）；③ 可选的「sing-box 配置导出」后端，用作 PoC 或对照。
+- **Agent 插件**：仓库同时是 Cowork / Claude Code 插件市场（`.claude-plugin/marketplace.json` → `plugins/tailproxy`），技能 `setup` / `rules` / `troubleshoot` 让 Agent 引导安装、配置、改规则和排障。
 - **嵌入式 SDK**：`sdk` 包让其他 Go 程序内嵌 tailproxy（经规则拨号、SOCKS5 入口、接管 VPN 的 TUN），`sdk/mobile` 是它的 gomobile 绑定形式。
 - **移动端**（TODO）：Go 核心通过 gomobile（`sdk/mobile`）编译为 Android AAR / iOS xcframework，外层是平台原生 UI；应用本身尚未开始。〔无来源·待验证：iOS Network Extension 的内存上限能否容纳多个 tsnet 节点〕
 

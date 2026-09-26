@@ -1,0 +1,81 @@
+name: release
+
+# A pushed tag vX.Y.Z builds tailproxy and tpctl for every supported
+# platform and publishes them, with checksums and the Cowork / Claude Code
+# plugin, as a GitHub Release. Tags with a suffix (v0.1.0-rc1) and 0.x
+# versions are published as pre-releases.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.6"
+      - name: Check the tag matches the plugin version
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          want="${tag#v}"
+          have="$(python3 -c 'import json; print(json.load(open("plugins/tailproxy/.claude-plugin/plugin.json"))["version"])')"
+          if [ "$want" != "$have" ]; then
+            echo "tag $tag but plugins/tailproxy/.claude-plugin/plugin.json has version $have" >&2
+            exit 1
+          fi
+      - name: Test
+        run: go test ./...
+      - name: Build
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          mkdir -p dist
+          # os/arch[/variant]: GOARM for arm, GOMIPS=softfloat for OpenWrt MIPS.
+          for target in linux/amd64 linux/arm64 linux/arm/7 linux/mips linux/mipsle linux/riscv64 \
+                        darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            IFS=/ read -r os arch variant <<<"$target"
+            name="$arch"; [ "$arch" = arm ] && name="armv$variant"
+            pkg="tailproxy_${version}_${os}_${name}"
+            ext=""; [ "$os" = windows ] && ext=".exe"
+            mkdir -p "build/$pkg"
+            for cmd in tailproxy tpctl; do
+              CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" GOARM="${variant:-}" GOMIPS=softfloat \
+                go build -trimpath -ldflags "-s -w -X main.version=${version}" -o "build/$pkg/$cmd$ext" "./cmd/$cmd"
+            done
+            cp LICENSE README.md config.example.yaml "build/$pkg/"
+            if [ "$os" = windows ]; then
+              (cd build && zip -qr "../dist/$pkg.zip" "$pkg")
+            else
+              tar -C build -czf "dist/$pkg.tar.gz" "$pkg"
+            fi
+          done
+          # The plugin, for uploading in Cowork / claude.ai (Customize > Plugins)
+          # when not installing it from this repository's marketplace.
+          (cd plugins/tailproxy && zip -qr "../../dist/tailproxy-plugin_${version}.zip" .)
+          (cd dist && sha256sum * > SHA256SUMS)
+          ls -l dist
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          prerelease=""
+          case "$version" in v0.*|*-*) prerelease="--prerelease" ;; esac
+          cat > notes.md <<EOF
+          tailproxy ${version}. Downloads: \`tailproxy_${version}_<os>_<arch>\` archives (tailproxy + tpctl + LICENSE + README + config.example.yaml), \`SHA256SUMS\`, and \`tailproxy-plugin_${version}.zip\` (the Cowork / Claude Code plugin).
+
+          - Windows TUN mode also needs \`wintun.dll\` from https://www.wintun.net next to \`tailproxy.exe\`.
+          - OpenWrt / MIPS routers: \`mips\` or \`mipsle\` builds (softfloat).
+          - Install as a plugin: add the marketplace \`NannaOlympicBroadcast/tailproxy\`, or upload the plugin zip; then ask Claude to set tailproxy up.
+          - Verification status per feature is in the README (\`当前进度\`); several features have only been tested in CI and network namespaces, not on real routers or long-term on desktops.
+
+          Licensed under MIT. Dependencies keep their own licenses (tailscale.com BSD-3-Clause, wireguard-go MIT, gVisor Apache-2.0, and others listed in go.mod).
+          EOF
+          gh release create "$version" dist/* --title "tailproxy $version" --notes-file notes.md $prerelease
