@@ -30,6 +30,19 @@ jobs:
           sudo ./tunstack.test -test.run TestTUNIntegration -test.v
       - name: TUN system DNS (host namespace, systemd-resolved)
         run: sudo TP_TUN_INTEGRATION=1 ./tunstack.test -test.run TestTUNSystemDNS -test.v
+      - name: SDK over a TUN file descriptor (network namespace, real TUN device)
+        run: |
+          go test -c -o sdk.test ./sdk/
+          sudo ./sdk.test -test.run TestServeTUNFD -test.v
+      - name: SDK builds for Android / iOS and binds with gomobile (gobind)
+        run: |
+          GOOS=android GOARCH=arm64 go build ./sdk/...
+          GOOS=ios GOARCH=arm64 go build ./sdk/...
+          # gobind checks the mobile API is bindable and generates the Java side;
+          # -mod=mod lets it resolve golang.org/x/mobile without adding it to go.mod.
+          GOFLAGS=-mod=mod go run golang.org/x/mobile/cmd/gobind@v0.0.0-20260908204917-8b95e45f8d3e -lang=go,java -outdir "$RUNNER_TEMP/gobind" ./sdk/mobile
+          grep -q "public native void startTUN" "$RUNNER_TEMP/gobind/java/mobile/Engine.java"
+          git checkout -- go.mod go.sum
 
   windows:
     runs-on: windows-latest

@@ -146,7 +146,7 @@ func (t *Transparent) handle(ctx context.Context, client net.Conn) {
 	target, c, err := t.Router.ConnectDest(ctx, t.inbound(), source, d)
 	if err != nil {
 		in.Close()
-		t.logf("tproxy: %s: %v", describe(c), err)
+		t.logf("%s: %s: %v", t.inbound(), describe(c), err)
 		return
 	}
 	t.Router.Relay(in, target, c)

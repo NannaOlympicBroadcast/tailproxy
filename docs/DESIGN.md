@@ -228,7 +228,8 @@
   - `tailproxy start|run|stop|status|token|relay|service|capture`：进程生命周期、中继、systemd 和透明捕获清理。`start` 以后台进程运行，面板就绪后打印地址和令牌再退出前台；状态文件、日志和持久化的令牌文件放在 `~/.lighthousepro`。
   - `tpctl`：日常操作，包括状态、出口增删改、规则测试、设备、连接和重新加载。`tpctl ts …` 内置官方 tailscale CLI，操作上面的主节点，所以本机不需要另装 tailscale，也不会多出一台设备。`tpctl schema config|api|commands` 输出配置 JSON Schema（由结构体反射生成）、OpenAPI 文档和命令清单。
 - **扩展点**：① Rule Provider；② Capture 后端接口（`Capture` interface，新平台只需实现它）；③ 可选的「sing-box 配置导出」后端，用作 PoC 或对照。
-- **移动端**：Go 核心通过 gomobile 编译为 Android AAR / iOS xcframework，外层是平台原生 UI。〔无来源·待验证：iOS Network Extension 的内存上限能否容纳多个 tsnet 节点〕
+- **嵌入式 SDK**：`sdk` 包让其他 Go 程序内嵌 tailproxy（经规则拨号、SOCKS5 入口、接管 VPN 的 TUN），`sdk/mobile` 是它的 gomobile 绑定形式。
+- **移动端**（TODO）：Go 核心通过 gomobile（`sdk/mobile`）编译为 Android AAR / iOS xcframework，外层是平台原生 UI；应用本身尚未开始。〔无来源·待验证：iOS Network Extension 的内存上限能否容纳多个 tsnet 节点〕
 
 ### 4.10 端口规划
 
@@ -333,7 +334,7 @@ rules:
 | M0 PoC | 两个 tsnet 槽位加 SOCKS5 入口，支持 keyword/CIDR 规则 | 通过两个槽位访问 IP 回显服务，返回的是两个不同出口的公网 IP。**状态：已验收（2026-09-24）**：在真实 tailnet 上，同一客户端经中国、美国两个出口分别得到 106.52.30.242 和 186.244.245.39（出口节点和中继两种方式都验证过，见 README） |
 | M1 Linux | nft TPROXY、FakeIP DNS、SNI/HTTP 嗅探、回环防护、CLI | 路由器（OpenWrt）上透明分流，没有 DNS 泄漏。**状态**：TPROXY（selective / all）、策略路由（netlink）、FakeIP + 分流 DNS、DNS 劫持、canary、SNI/Host 嗅探、防回环、`capture down`、L2 DoH/DoT/DoQ 封堵、L3 ECH 剥离、L4 规则域名预解析与应答学习、L0 可见度统计都已实现，并在网络命名空间里做了集成测试；L4 的 `outer_sni` 规则已实现（外层 SNI 只由 `outer_sni` 匹配，不再当作域名）；UDP 代理已实现（`capture.udp: proxy`，经出口节点 / 直连，中继不承载 UDP；QUIC Initial SNI 嗅探支持 v1 / v2，跨数据报合并 ClientHello），在网络命名空间里做了集成测试；L5 浏览器策略已实现（`tailproxy doctor --apply-browser-policy` / `--revert-browser-policy`：Chrome/Chromium/Edge `DnsOverHttpsMode=off`、可选 Chrome `EncryptedClientHelloEnabled=false`、Firefox `DNSOverHTTPS {Enabled:false, Locked:true}`，Linux 策略文件 / macOS defaults（推荐级别）/ Windows 注册表，逐项记录原值可撤销）[来源 S55][来源 S56][来源 S57][来源 S58][来源 S59]，三平台写入与撤销在 CI 中测试，尚未在真实浏览器中确认生效；验收项需要真实路由器，尚未完成 |
 | M2 桌面 | Windows Wintun、macOS utun、与系统 Tailscale 共存 | 官方客户端保持 tailnet 访问，tailproxy 负责出口分流。**状态**：TUN 引擎（`internal/tunstack`：gVisor netstack + wireguard-go `tun.Device`，TCP/UDP 交给与 TPROXY 相同的入口，协议栈内 DNS）已实现，跨平台编译；`capture.mode: tun` 已在三个平台接入：Linux 用独立路由表 + 绕行标记优先查 main 表；macOS utun 用 ifconfig/route，防回环用 `IP_BOUND_IF` 绑定默认路由网卡；Windows Wintun 用 IP Helper API，防回环用 `IP_UNICAST_IF`。三个平台都在 CI 里用真实 TUN 设备跑通集成测试。系统 DNS 自动设置与恢复（`capture.tun_system_dns`）：Linux systemd-resolved 仅路由域 `~.`（据 systemd-resolved 文档，其他网卡不再参与这些查询，除非它们也配置了 `~.`）[来源 S52]，macOS networksetup（同 wg-quick）[来源 S53]，Windows 网卡 DNS + 跃点数 0（同 wireguard-windows）[来源 S54]，三个平台在 CI 中用系统解析器验证。`capture.scope: all` 也已支持：默认路由拆成两半进入 TUN，排除网段在 Linux 用 throw 路由、在 macOS / Windows 由入口绑定物理网卡直连。尚未实现：与系统 Tailscale 共存的实测（其 MagicDNS 若也设 `~.` 会并行查询）、Windows 默认路由冲突（R5）回归 |
-| M3 移动 | Android VpnService、iOS NEPacketTunnelProvider（gomobile） | 单个 VPN 同时提供 tailnet 访问和多出口分流 |
+| M3 移动 | Android VpnService、iOS NEPacketTunnelProvider（gomobile） | 单个 VPN 同时提供 tailnet 访问和多出口分流。**状态**：只提供 SDK——`sdk`（Go 嵌入接口：经规则拨号、SOCKS5、`ServeTUN` / `ServeTUNFD`、`Protect` 回调，Android 上经 `netns.SetAndroidProtectFunc` 让 Tailscale 节点的套接字也绕过 VPN）和 `sdk/mobile`（gomobile 绑定），CI 交叉编译 Android / iOS 并用 gobind 生成绑定；**Android / iOS 应用为 TODO**，未在真机运行 |
 | M4 生态 | Rule Provider、出口组健康检查、指标、GUI | —。**已有**：`tpctl` 命令行（内置官方 tailscale CLI，操作 tailproxy 主节点，本机无需另装 tailscale；`tpctl schema` 输出配置 JSON Schema、OpenAPI、命令清单） |
 
 ## 8. 测试策略〔无来源·设计决策〕

@@ -18,7 +18,9 @@
 | Linux 透明捕获（`capture.mode: tproxy`）：nftables TPROXY + 策略路由、FakeIP / 分流 DNS、SNI / HTTP Host 嗅探、DNS 劫持、防回环 | 已实现；在网络命名空间里做了端到端集成测试，**尚未在真实路由器 / OpenWrt 上验证** |
 | `tpctl` 本机命令行：管理 tailproxy + 内置官方 tailscale 客户端（操作主节点）+ schema | 已实现；Linux / macOS 走 Unix 套接字，Windows 走命名管道（由 CI 在真实 Windows 上验证） |
 | UDP 代理（Linux 透明捕获，`capture.udp: proxy`）：按规则经出口节点 / 直连转发 UDP（如 QUIC） | 已实现；网络命名空间集成测试覆盖，**尚未在真实路由器和出口节点上验证**；中继出口不承载 UDP |
-| TUN 模式（`capture.mode: tun`）：TUN 设备 + gVisor 用户态协议栈，路由 + 协议栈内 DNS | Linux / macOS（utun）/ Windows（Wintun）已实现，三个平台都在 GitHub Actions 上用真实 TUN 设备跑通集成测试（DNS→FakeIP、TCP、UDP 到出口）；运行时自动把系统 DNS 指向协议栈内 DNS、退出时恢复（`capture.tun_system_dns`，CI 中三个平台都用系统解析器验证过）；Windows 需要 `wintun.dll`；支持 selective 和 all 范围（all：Linux 在网络命名空间里用真实设备测试）；Android / iOS 未实现；尚未在真实桌面上长期使用 |
+| TUN 模式（`capture.mode: tun`）：TUN 设备 + gVisor 用户态协议栈，路由 + 协议栈内 DNS | Linux / macOS（utun）/ Windows（Wintun）已实现，三个平台都在 GitHub Actions 上用真实 TUN 设备跑通集成测试（DNS→FakeIP、TCP、UDP 到出口）；运行时自动把系统 DNS 指向协议栈内 DNS、退出时恢复（`capture.tun_system_dns`，CI 中三个平台都用系统解析器验证过）；Windows 需要 `wintun.dll`；支持 selective 和 all 范围（all：Linux 在网络命名空间里用真实设备测试）；Android / iOS 走移动端 SDK（应用为 TODO）；尚未在真实桌面上长期使用 |
+| 嵌入式 SDK（`sdk`）：在其他 Go 程序里内嵌 tailproxy——经规则拨号（`DialContext` / `HTTPClient`）、SOCKS5 入口、接管 VPN 的 TUN 设备或文件描述符 | 已实现；单元测试 + 网络命名空间里用真实 TUN 文件描述符的集成测试（CI） |
+| 移动端 SDK（`sdk/mobile`，gomobile）：Android AAR / iOS xcframework 的绑定接口 | 已实现；CI 中交叉编译 Android / iOS 并用 gobind 生成 Java 绑定；**Android / iOS 应用本身是 TODO**，未在真机上运行 |
 
 ## 启动与管理
 
@@ -425,6 +427,50 @@ sudo tailproxy doctor --revert-browser-policy      # 撤销，恢复原来的值
 - 每项改动的原值记录在 `/var/lib/tailproxy/browser-policy.json`（macOS `/var/db/tailproxy/…`，Windows `%ProgramData%\tailproxy\…`），撤销时按记录逐项恢复；写入中途失败会自动回滚。
 - 重启浏览器后生效，可在 `chrome://policy`、`edge://policy`、`about:policies` 查看。
 - 验证情况：三个平台的写入与撤销都有测试（Linux 用临时目录、macOS 用临时 plist 和真实 `defaults`、Windows 用 HKCU 下的临时键和真实注册表），在 CI 中运行；**没有在真实浏览器里确认策略生效**。
+
+### 嵌入式 SDK：把 tailproxy 放进你的应用
+
+除了作为独立服务运行，tailproxy 也可以作为库嵌入其他程序：同样的规则、出口节点 / 中继出口、tailnet 访问、FakeIP DNS 和连接追踪，但不需要另起进程，也不改系统路由。
+
+**Go**（`github.com/NannaOlympicBroadcast/tailproxy/sdk`）：
+
+```go
+cfg, _ := sdk.LoadConfig("config.yaml")          // 与服务相同的配置格式
+eng, _ := sdk.New(sdk.Options{Config: cfg, StateDir: "/var/lib/myapp/tailproxy"})
+eng.Start(ctx)                                    // 后台启动主节点和出口节点（auth key 或 eng.Account().Main.AuthURL 登录）
+defer eng.Close()
+
+resp, err := eng.HTTPClient().Get("https://api.openai.com/v1/models") // 按规则走出口
+conn, err := eng.DialContext(ctx, "tcp", "db.internal:5432")            // tcp / udp，被拒绝时返回 sdk.ErrRejected
+ln, _ := sdk.ListenSOCKS("127.0.0.1:1080"); go eng.ServeSOCKS(ctx, ln) // 给其他进程用的 SOCKS5（CONNECT + UDP）
+```
+
+| 能力 | 接口 |
+|---|---|
+| 经规则拨号 / HTTP | `DialContext(ctx, "tcp"|"udp", "host:port")`、`HTTPClient()`；连接在 `Connections()` 中显示为 `sdk` 入口 |
+| SOCKS5 入口 | `ListenSOCKS`（只允许回环地址）+ `ServeSOCKS` |
+| VPN / TUN | `ServeTUN(ctx, tun.Device, TUNOptions)`、`ServeTUNFD(ctx, fd, mtu, TUNOptions)`：协议栈内 DNS（FakeIP）、TCP/UDP 按规则转发；路由和系统 DNS 由应用 / 平台 VPN 设置 |
+| 绕过自身 VPN | `Options.Protect func(fd int) bool`：tailproxy 自己的直连、上游 DNS，以及 Android 上 Tailscale 节点的套接字在连接前交给它（Android 传 `VpnService.protect`） |
+| 查询与控制 | `Match`、`Connections`、`Egress`、`Account`、`SetConfig`（热更新规则和出口）、`SetAuthKey` |
+
+**Android / iOS**（`sdk/mobile`，gomobile 绑定，只用字符串 / 整数 / 小接口，结构化数据为 JSON）：
+
+```sh
+gomobile bind -target=android -androidapi 24 ./sdk/mobile   # 生成 AAR
+gomobile bind -target=ios ./sdk/mobile                       # 生成 xcframework
+```
+
+```kotlin
+val engine = Engine(configYaml, filesDir.path + "/tailproxy", logger, protector /* 调 VpnService.protect */)
+engine.start()
+val fd = Builder().addAddress("172.19.0.1", 30).addDnsServer("172.19.0.2")
+    .addRoute("198.18.0.0", 15).addRoute("172.19.0.2", 32).establish()!!.detachFd()
+engine.startTUN(fd.toLong(), 1500, "172.19.0.2", "223.5.5.5,119.29.29.29")
+// engine.accountJSON() / connectionsJSON() / matchJSON(...) / updateConfig(...) / stop()
+```
+
+- 系统级捕获（nftables TPROXY、创建 TUN 设备和路由、修改系统 DNS、浏览器策略）只在 `tailproxy` 命令里提供，SDK 不做。
+- 验证情况：Go SDK 有单元测试，并在网络命名空间里把真实 TUN 设备的文件描述符交给 `ServeTUNFD`（像 VPN 应用那样）测试了 DNS→FakeIP、上游转发经 `Protect`、按规则拒绝、UDP 立即不可达；移动端包在 CI 中交叉编译 Android / iOS，并用 gobind 生成 Java 绑定检查接口可绑定。**Android / iOS 应用本身是 TODO**，SDK 还没有在真机上运行过。
 
 ### 访问控制
 

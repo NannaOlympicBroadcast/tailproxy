@@ -330,14 +330,14 @@ func (t *TransparentUDP) setup(ctx context.Context, f *udpFlow) error {
 
 	up, c, err := t.Router.ConnectUDP(ctx, t.inbound(), source, d)
 	if err != nil {
-		t.logf("tproxy udp: %s: %v", describe(c), err)
+		t.logf("%s udp: %s: %v", t.inbound(), describe(c), err)
 		return err
 	}
 	down, err := t.Reply(orig, client)
 	if err != nil {
 		up.Close()
 		t.Router.Tracker.finish(c, "reply socket: "+err.Error())
-		t.logf("tproxy udp: %s: reply socket: %v", describe(c), err)
+		t.logf("%s udp: %s: reply socket: %v", t.inbound(), describe(c), err)
 		return err
 	}
 	f.up, f.down, f.c = up, down, c
