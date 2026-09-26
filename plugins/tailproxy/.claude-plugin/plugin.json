@@ -2,7 +2,7 @@
   "name": "tailproxy",
   "version": "0.1.0",
   "description": "Install and configure tailproxy (rule-based routing of apps and sites through Tailscale exit nodes and relays) with an agent guiding each step: deployment choice, exits, routing rules, login, start, verification and troubleshooting.",
-  "icon": "./tailproxy-logo-512.png",
+  "icon": "https://raw.githubusercontent.com/NannaOlympicBroadcast/tailproxy/refs/heads/main/plugins/tailproxy/tailproxy-logo-512.png",
   "author": {
     "name": "NannaOlympicBroadcast"
   },
