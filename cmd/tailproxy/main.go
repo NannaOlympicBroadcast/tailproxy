@@ -47,6 +47,7 @@ const usage = `用法：tailproxy <命令> [参数]
   service  install / uninstall：安装为 systemd 服务并开机自启（见 tailproxy service -h）
   relay    在出口机器（VPS）上运行中继，客户端经 tailnet 用它出网（见 tailproxy relay -h）
   capture  down：删除透明捕获留下的 nftables 规则和策略路由（进程崩溃后恢复网络用）
+  doctor   --apply-browser-policy / --revert-browser-policy：关闭 / 恢复浏览器自带的 DoH（见 tailproxy doctor -h）
   version  打印版本
 
 start / run 的参数：
@@ -85,6 +86,8 @@ func main() {
 		err = cmdRelay(args)
 	case "capture":
 		err = cmdCapture(args)
+	case "doctor":
+		err = cmdDoctor(args)
 	case "version", "--version", "-version":
 		fmt.Println(version)
 	case "help", "-h", "--help":

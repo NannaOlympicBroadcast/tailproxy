@@ -405,6 +405,27 @@ tailproxy 本身已经带着一个登录好的 Tailscale 节点（主节点）�
 
 如果开始编辑后配置文件被手动修改、被重新加载，或者被另一个会话保存过，保存会返回 409 冲突，而不是覆盖别人的修改。
 
+### 浏览器策略：关闭浏览器自带的 DoH（L5，需明确执行）
+
+浏览器自带 DoH 时会绕过系统 DNS，FakeIP 和按域名分流就拿不到域名。`tailproxy doctor` 可以写入浏览器的企业策略把它关掉，写入前列出所有改动并要求输入 `yes`，随时可以一键撤销：
+
+```sh
+sudo tailproxy doctor                              # 只查看：将写入什么、当前是否已应用
+sudo tailproxy doctor --apply-browser-policy       # 写入（加 --disable-ech 同时关闭 Chrome 的 ECH；--yes 跳过确认）
+sudo tailproxy doctor --revert-browser-policy      # 撤销，恢复原来的值
+```
+
+| 浏览器 | 写入的策略 | Linux | macOS | Windows |
+|---|---|---|---|---|
+| Chrome / Chromium | `DnsOverHttpsMode = "off"`；可选 `EncryptedClientHelloEnabled = false` | `/etc/opt/chrome/policies/managed/tailproxy.json`；Chromium 为 `/etc/chromium/…` 和 Ubuntu 的 `/etc/chromium-browser/…` | `defaults`：`/Library/Preferences/com.google.Chrome`（**推荐**级别，用户仍可改回；强制级别需要 MDM 描述文件） | `HKLM\SOFTWARE\Policies\Google\Chrome` |
+| Edge | `DnsOverHttpsMode = "off"` | `/etc/opt/edge/policies/managed/tailproxy.json` | `defaults`：`/Library/Preferences/com.microsoft.Edge`（推荐级别） | `HKLM\SOFTWARE\Policies\Microsoft\Edge` |
+| Firefox | `DNSOverHTTPS {Enabled: false, Locked: true}` | `/etc/firefox/policies/policies.json`（合并，保留其他策略） | `Firefox.app/Contents/Resources/distribution/policies.json` | `HKLM\SOFTWARE\Policies\Mozilla\Firefox\DNSOverHTTPS` |
+
+- Linux / macOS 只为检测到已安装的浏览器写入（`--all-browsers` 强制全部）；Windows 三个浏览器的注册表项都写入（未安装的浏览器不受影响）。
+- 每项改动的原值记录在 `/var/lib/tailproxy/browser-policy.json`（macOS `/var/db/tailproxy/…`，Windows `%ProgramData%\tailproxy\…`），撤销时按记录逐项恢复；写入中途失败会自动回滚。
+- 重启浏览器后生效，可在 `chrome://policy`、`edge://policy`、`about:policies` 查看。
+- 验证情况：三个平台的写入与撤销都有测试（Linux 用临时目录、macOS 用临时 plist 和真实 `defaults`、Windows 用 HKCU 下的临时键和真实注册表），在 CI 中运行；**没有在真实浏览器里确认策略生效**。
+
 ### 访问控制
 
 - **所有 API 和 `/metrics` 都需要令牌**（`Authorization: Bearer <令牌>`），只有登录页本身的静态文件不需要。令牌用常数时间比较。
