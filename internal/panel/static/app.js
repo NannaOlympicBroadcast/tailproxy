@@ -91,7 +91,7 @@ function fmtTime(iso) {
 }
 
 const STATE_TEXT = {
-  running: "运行中", loaded: "已加载", ready: "就绪", idle: "空闲", disabled: "未启用", degraded: "部分就绪",
+  running: "运行中", active: "活跃", loaded: "已加载", ready: "就绪", idle: "空闲", disabled: "未启用", degraded: "部分就绪",
   not_implemented: "未实现", not_running: "未运行",
   starting: "启动中", needs_login: "需要登录", needs_machine_auth: "等待批准",
   exit_node_pending: "等待出口节点", exit_node_offline: "出口节点离线", stopped: "已停止", error: "错误",
@@ -106,9 +106,11 @@ async function loadStatus() {
   const s = await api("/api/v1/status");
   $("version").textContent = s.version;
   $("uptime").textContent = fmtDuration(s.uptime_seconds);
+  $("kernel-mode").textContent = s.kernel === "bacarra" ? "Bacarra" : "Davin";
   $("n-rules").textContent = s.rules;
   $("n-slots").textContent = s.egress_slots;
   $("n-groups").textContent = s.egress_groups;
+  $("cfg-kernel").textContent = s.kernel === "bacarra" ? "Bacarra（宿主官方 Tailscale 路由劫持）" : "Davin（嵌入式 tsnet 多节点代理）";
   $("cfg-path").textContent = s.config_path;
   $("cfg-loaded").textContent = fmtTime(s.config_loaded);
   $("panel-listen").textContent = s.panel_listen;
@@ -184,7 +186,11 @@ function renderAccount() {
   body.replaceChildren();
   $("account-state").replaceChildren();
   if (t.error || !t.account) {
-    body.append(el("p", "代理未运行，无法读取 Tailscale 状态" + (t.error ? "：" + t.error : ""), "muted"));
+    const isBacarra = document.getElementById("cfg-kernel")?.textContent?.includes("Bacarra");
+    const msg = isBacarra
+      ? "Bacarra 模式由本机官方 Tailscale 客户端接管网络栈。出口节点请在官方客户端或通过 'tailscale set --exit-node=...' 配置。"
+      : "代理未运行，无法读取 Tailscale 状态" + (t.error ? "：" + t.error : "");
+    body.append(el("p", msg, "muted"));
     $("authkey-box").hidden = true;
     return;
   }

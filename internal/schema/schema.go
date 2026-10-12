@@ -22,6 +22,7 @@ type meta struct {
 
 var fields = map[string]meta{
 	"":                               {desc: "tailproxy 配置文件（YAML）。未知字段会被拒绝。"},
+	"kernel":                         {desc: "代理内核引擎：davin（内嵌 tsnet 多节点透明代理）或 bacarra（复用宿主机官方 Tailscale 客户端路由劫持）", enum: []string{"davin", "bacarra"}, def: "davin"},
 	"tailnet":                        {desc: "Tailscale 控制面与主节点"},
 	"tailnet.hostname":               {desc: "主节点主机名", def: "tailproxy"},
 	"tailnet.control_url":            {desc: "控制面地址（Headscale 等自建控制面时填写）", format: "uri"},

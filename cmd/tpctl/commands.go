@@ -14,6 +14,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/config"
+	"github.com/NannaOlympicBroadcast/tailproxy/internal/rule"
 )
 
 // Command describes one tpctl command. The same table drives dispatch,
@@ -40,6 +41,7 @@ var commands []*Command
 func init() {
 	commands = []*Command{
 		{Name: "status", Summary: "tailproxy 各组件状态（面板、规则、出口管理器、透明捕获、DNS…）", APIPaths: []string{"GET /api/v1/status"}, run: cmdStatus},
+		{Name: "check", Args: []string{"[-c FILE]"}, Flags: []Flag{{"c", "string", "配置文件路径（默认 config.yaml）"}}, Summary: "校验配置文件有效性（支持 davin / bacarra 内核）", run: cmdCheck},
 		{Name: "egress list", Summary: "已配置的出口及运行状态（出口节点 / 中继 / 出口组）", APIPaths: []string{"GET /api/v1/egress"}, run: cmdEgressList},
 		{Name: "egress add", Args: []string{"<name>"}, Mutates: true, Summary: "新增出口（二选一：--exit-node 或 --relay）；中继令牌从标准输入读取",
 			Flags:    []Flag{{"exit-node", "string", "出口节点：主机名 / MagicDNS 名 / 100.x IP / StableID"}, {"relay", "string", "中继地址 host:port（对方运行 tailproxy relay）"}, {"token-stdin", "bool", "从标准输入读中继令牌并保存"}},
@@ -181,23 +183,85 @@ func table(rows [][]string) {
 func cmdStatus(g globals, _ []string) error {
 	return rawOr(g, "/api/v1/status", func(raw json.RawMessage) error {
 		var s struct {
-			Version    string `json:"version"`
-			Uptime     int64  `json:"uptime_seconds"`
-			ConfigPath string `json:"config_path"`
-			Rules      int    `json:"rules"`
-			Components []struct{ Name, State, Detail string }
+			Version      string          `json:"version"`
+			Kernel       string          `json:"kernel"`
+			KernelStatus json.RawMessage `json:"kernel_status,omitempty"`
+			Uptime       int64           `json:"uptime_seconds"`
+			ConfigPath   string          `json:"config_path"`
+			Rules        int             `json:"rules"`
+			Components   []struct{ Name, State, Detail string }
 		}
 		if err := json.Unmarshal(raw, &s); err != nil {
 			return err
 		}
-		fmt.Printf("tailproxy %s，已运行 %s，配置 %s，%d 条规则\n\n", s.Version, fmtDur(s.Uptime), s.ConfigPath, s.Rules)
+		kernel := s.Kernel
+		if kernel == "" {
+			kernel = "davin"
+		}
+		fmt.Printf("tailproxy %s（内核：%s），已运行 %s，配置 %s，%d 条规则\n\n", s.Version, kernel, fmtDur(s.Uptime), s.ConfigPath, s.Rules)
 		rows := [][]string{{"组件", "状态", "说明"}}
 		for _, c := range s.Components {
 			rows = append(rows, []string{c.Name, c.State, c.Detail})
 		}
 		table(rows)
+
+		if kernel == "bacarra" && len(s.KernelStatus) > 0 {
+			var bs struct {
+				AdapterName string   `json:"adapter_name"`
+				Routes      []string `json:"routes"`
+			}
+			if err := json.Unmarshal(s.KernelStatus, &bs); err == nil && len(bs.Routes) > 0 {
+				fmt.Printf("\nBacarra 路由劫持网段 (%d 条)：\n", len(bs.Routes))
+				for _, r := range bs.Routes {
+					fmt.Printf("  • %s -> %s\n", r, bs.AdapterName)
+				}
+			}
+		}
 		return nil
 	})
+}
+
+func cmdCheck(g globals, args []string) error {
+	fs := flag.NewFlagSet("check", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	path := fs.String("c", "config.yaml", "")
+	if err := fs.Parse(args); err != nil || fs.NArg() > 0 {
+		fmt.Println("用法：tpctl check [-c FILE]   # 校验配置文件，不启动服务")
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		if err == nil {
+			err = fmt.Errorf("unexpected argument %q", fs.Arg(0))
+		}
+		return err
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return fmt.Errorf("%s: %w", *path, err)
+	}
+	eng, err := rule.Compile(cfg.Rules)
+	if err != nil {
+		return fmt.Errorf("%s: %w", *path, err)
+	}
+	slots, groups := 0, 0
+	for _, e := range cfg.Egress {
+		if e.Type != "" {
+			groups++
+		} else {
+			slots++
+		}
+	}
+	socks := cfg.Capture.SocksListen
+	if socks == "" {
+		socks = "关闭"
+	}
+	kernel := cfg.Kernel
+	if kernel == "" {
+		kernel = "davin"
+	}
+	fmt.Printf("%s：配置有效\n  内核模式 %s\n  出口 %d 个、出口组 %d 个，规则 %d 条\n  捕获模式 %s（范围 %s），SOCKS5 %s，DNS %s\n  面板 %s\n",
+		*path, kernel, slots, groups, eng.Len(), cfg.Capture.Mode, cfg.Capture.Scope, socks, cfg.DNS.Mode, cfg.Panel.Listen)
+	return nil
 }
 
 func fmtDur(sec int64) string {

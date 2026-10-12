@@ -37,7 +37,14 @@ func IsReservedTarget(name string) bool {
 	return false
 }
 
+// Supported proxy kernel engines.
+const (
+	KernelDavin   = "davin"
+	KernelBacarra = "bacarra"
+)
+
 type Config struct {
+	Kernel         string   `yaml:"kernel,omitempty" json:"kernel,omitempty"`
 	Tailnet        Tailnet  `yaml:"tailnet" json:"tailnet"`
 	Egress         []Egress `yaml:"egress" json:"egress"`
 	DNS            DNS      `yaml:"dns" json:"dns"`
@@ -248,6 +255,9 @@ func Parse(data []byte) (*Config, error) {
 }
 
 func (c *Config) applyDefaults() {
+	if c.Kernel == "" {
+		c.Kernel = KernelDavin
+	}
 	if c.Panel.Listen == "" {
 		c.Panel.Listen = DefaultPanelListen
 	}
@@ -302,6 +312,11 @@ func (c *Capture) TUNDNSAddr() netip.Addr {
 // Validate checks cross-references between egress entries and rules.
 func (c *Config) Validate() error {
 	var errs []error
+	switch c.Kernel {
+	case KernelDavin, KernelBacarra:
+	default:
+		errs = append(errs, fmt.Errorf("kernel %q: unknown kernel mode (must be %q or %q)", c.Kernel, KernelDavin, KernelBacarra))
+	}
 	slots := map[string]bool{}
 	names := map[string]bool{}
 	for i, e := range c.Egress {

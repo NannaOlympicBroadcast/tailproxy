@@ -68,7 +68,7 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospac
 code { background: var(--code-bg); padding: 1px 4px; border-radius: 4px; }
 pre { background: var(--code-bg); padding: 12px; border-radius: 6px; overflow-x: auto; margin: 0; }
 .state { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; border: 1px solid var(--border); }
-.state.running, .state.loaded, .state.ready { color: var(--ok); border-color: currentColor; }
+.state.running, .state.loaded, .state.ready, .state.active { color: var(--ok); border-color: currentColor; }
 .state.not_implemented, .state.not_running { color: var(--warn-text); background: var(--warn-bg); border-color: transparent; }
 .banner { padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; }
 .banner.warn { background: var(--warn-bg); color: var(--warn-text); }

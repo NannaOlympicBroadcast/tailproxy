@@ -56,6 +56,12 @@ type Runtime interface {
 	SetRelayToken(name, token string) error
 }
 
+// KernelReporter is an optional interface implemented by Runtime to provide
+// detailed kernel status to /api/v1/status.
+type KernelReporter interface {
+	KernelStatus() any
+}
+
 // Server is the web panel. Create it with New and run it with ListenAndServe.
 type Server struct {
 	cfgPath string
@@ -323,7 +329,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			slots++
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	kernelMode := cfg.Kernel
+	if kernelMode == "" {
+		kernelMode = "davin"
+	}
+	resp := map[string]any{
 		"version":        s.version,
 		"started_at":     s.started.UTC().Format(time.RFC3339),
 		"uptime_seconds": int64(time.Since(s.started).Seconds()),
@@ -331,11 +341,20 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"config_loaded":  loaded.UTC().Format(time.RFC3339),
 		"panel_listen":   cfg.Panel.Listen,
 		"token_source":   s.tokenSource(),
+		"kernel":         kernelMode,
 		"rules":          engine.Len(),
 		"egress_slots":   slots,
 		"egress_groups":  groups,
 		"components":     s.components(),
-	})
+	}
+	if s.runtime != nil {
+		if kr, ok := s.runtime.(KernelReporter); ok {
+			if ks := kr.KernelStatus(); ks != nil {
+				resp["kernel_status"] = ks
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) components() []Component {
@@ -352,6 +371,16 @@ func (s *Server) components() []Component {
 	}
 	if s.runtime != nil {
 		return append(out, s.runtime.Components()...)
+	}
+	s.mu.RLock()
+	kernelMode := s.cfg.Kernel
+	s.mu.RUnlock()
+	if kernelMode == "bacarra" {
+		return append(out,
+			Component{Name: "kernel", State: "not_running", Detail: "Bacarra 内核未运行"},
+			Component{Name: "tailscale_adapter", State: "not_running", Detail: "网卡探测未启动"},
+			Component{Name: "route_manager", State: "not_running", Detail: "路由管理器未运行"},
+		)
 	}
 	return append(out,
 		Component{Name: "egress_manager", State: "not_running", Detail: egressNotRunning},
@@ -405,6 +434,9 @@ func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var restart []string
+	if cfg.Kernel != old.Kernel {
+		restart = append(restart, "kernel")
+	}
 	if cfg.Panel != old.Panel {
 		restart = append(restart, "panel")
 	}

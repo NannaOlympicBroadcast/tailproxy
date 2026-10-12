@@ -43,6 +43,12 @@
 
 **核心思路**：一个出口节点对应一个进程内的 tsnet 节点（下称「Egress 槽位」）。有 N 个出口，就在同一进程里跑 N 个 tsnet 节点，每个节点固定一个 `ExitNodeID`。这样就绕过了「每台设备同时只能用一个出口节点」的限制，再由本地的规则引擎决定每条连接交给哪个槽位。〔无来源·设计决策，技术基础见上表〕
 
+### 1.4 双内核引擎演进（Dual-Kernel Architecture）〔无来源·设计决策〕
+
+为了兼顾不同的部署环境与资源约束，tailproxy 演进为支持双内核引擎架构：
+1. **Davin 内核**（默认）：基于内嵌 `tsnet.Server` 的多槽位透明代理引擎。适用于无官方客户端环境、路由器与嵌入式系统，支持单机多出口并发分流。
+2. **Bacarra 内核**：基于宿主机官方 Tailscale 客户端的网络栈与主机路由表劫持引擎。适用于已安装官方 Tailscale 客户端的工作站，零额外节点配额消耗，由操作系统内核完成高性能线速转发。
+
 ---
 
 ## 2. 目标与非目标
@@ -92,6 +98,84 @@
 4. 规则引擎按顺序匹配，`domain_keyword: openai` 命中，目标为 `us`。
 5. 出口管理器用 `us` 槽位对应的 tsnet 节点，经由这个出口做 DoH，把 `chat.openai.com` 解析为真实 IP，然后调用 `Dial` 发起连接。因为这个节点设置了 `ExitNodeID`，流量从出口节点 B 出去 [来源 S4]。
 6. 双向拷贝数据，记录统计信息。
+
+### 3.2 双内核架构与数据流路径对比
+
+#### 3.2.1 架构全景对照图
+
+```
+========================= Davin 内核模式 (Embedded tsnet Multi-Slot) =========================
+
+   [ 应用程序 Application ]
+             │ DNS Query (chat.openai.com)
+             ▼
+   [ tailproxy DNS 模块 ] ──(劫持并返回 FakeIP 198.18.0.7)──▶ [ 应用程序 ]
+             │                                                      │
+             │                                                      ▼ Connect 198.18.0.7:443
+   [ 捕获层 Capture ] ◀─────────────────────────────────────────────┘
+   (Linux TPROXY / Wintun / utun / SOCKS5)
+             │
+             ▼ 提取原始连接与首包 SNI
+   [ 规则引擎 Rule Engine ] ──(首条命中: openai -> 出口槽位 "us")──┐
+                                                                   │
+   ┌───────────────────────────────────────────────────────────────┘
+   ▼
+   [ 出口管理器 Egress Manager ]
+   ┌────────────────────────────────────────────────────────────────┐
+   │ tsnet.Server 槽位 "us" (独立 gVisor 用户态协议栈 + WireGuard)    │
+   │ 1. 经槽位 DoH 解析真实 IP                                      │
+   │ 2. Server.Dial("tcp", "真实IP:443")                             │
+   │ 3. 设置 ExitNodeID ──▶ 加密发往 Tailscale 出口节点 B             │
+   └────────────────────────────────────────────────────────────────┘
+             │                                    │
+             ▼ WireGuard (UDP)                    ▼
+   [ 物理网络接口 ] ──(经过绕行标记 SO_MARK / 绑定物理网卡，防回环)──▶ Internet
+
+
+========================= Bacarra 内核模式 (Host Route Hijacking) =========================
+
+   [ 应用程序 Application ]
+             │ DNS Query (chat.openai.com)
+             ▼
+   [ tailproxy DNS 模块 ] ──(劫持并返回 FakeIP 198.18.0.7)──▶ [ 应用程序 ]
+             │                                                      │
+             │ (路由预注入: 198.18.0.0/15 -> Tailscale 网卡)        ▼ Connect 198.18.0.7:443
+             │                                              [ 操作系统内核路由表 ]
+             │                                              (OS Routing Table)
+             │                                                      │
+   ┌─────────┴──────────────────────────────────────────────────────┴─────────┐
+   │ 路由匹配判定 (Route Decision):                                           │
+   │  - 目标为 FakeIP (198.18.0.0/15) 或规则 CIDR ──▶ 命中 Tailscale 路由     │
+   │  - 其余非代理直连流量 (Direct)              ──▶ 命中宿主默认物理路由     │
+   └────────────────────────────────┬───────────────────────────────┬─────────┘
+                                    │ (匹配代理)                    │ (直连)
+                                    ▼                               ▼
+                     [ 官方 Tailscale 虚拟网卡 ]              [ 物理网卡 Default Gateway ]
+                     (Windows Tailscale / tailscale0 / utun)        │
+                                    │                               ▼
+                                    ▼                        [ 直接访问 Internet ]
+                     [ 官方 tailscaled 后台服务 ]
+                     (按官方设置的 Exit Node 加密转发)
+                                    │
+                                    ▼
+                         [ Tailscale 出口节点 ]
+                                    │
+                                    ▼
+                               [ Internet ]
+```
+
+#### 3.2.2 核心机制深度对比矩阵
+
+| 维度 | Davin 内核模式 (`kernel: davin`) | Bacarra 内核模式 (`kernel: bacarra`) |
+|---|---|---|
+| **核心定位** | 独立内嵌透明代理（无官方客户端环境首选） | 官方客户端增强劫持（已装 Tailscale 桌面环境首选） |
+| **Tailscale 依赖** | **无**。不需要安装官方 Tailscale 客户端 | **必需**。宿主机必须运行官方客户端（`tailscaled` / GUI） |
+| **节点配额消耗** | 每个出口槽位占用 1 个 tailnet tagged 设备配额 | **0 配额**。完全复用宿主机既有节点身份 |
+| **出口节点能力** | **多出口同时并发**（不同域名走不同出口节点） | **单出口转发**（所有代理流量走官方客户端当前指定的出口） |
+| **转发层级** | 用户态 gVisor netstack + Go 进程双向数据拷贝 | 操作系统内核网络栈直接路由转发出虚拟网卡，零用户态拷贝开销 |
+| **路由表修改** | 仅 TUN/TPROXY 自身捕获，不篡改系统全局路由 | 动态向系统主路由表注入 FakeIP 与规则 CIDR 网段 |
+| **权限要求** | 普通用户（SOCKS5 模式）/ root（TUN、TPROXY） | **必需管理员权限**（Windows Administrator，Linux/macOS root） |
+| **崩溃恢复保障** | 退出即释放虚拟网卡与套接字 | 需依赖 `<stateDir>/bacarra_routes.json` 与清理机制 |
 
 ---
 
@@ -251,6 +335,50 @@
 **出站**（防火墙必须放行）：TCP 443（控制面和 DERP 中继）、UDP 3478（STUN）、WireGuard UDP 源端口；TCP 80 可选（控制面回退、强制门户检测）[来源 S47]。
 
 **Web 面板安全**〔无来源·设计决策〕：所有 API 和 `/metrics` 始终需要访问令牌。未通过 `panel.auth_token_env` 指定令牌时，首次启动生成 32 字节随机令牌并持久化到 `~/.lighthousepro/tailproxy.token`（0600，之后每次启动沿用，`tailproxy token --rotate` 更换；`--ephemeral-token` 使用一次性令牌），并在终端打印面板地址、令牌和一键登录链接（令牌放在 URL 的 `#` 片段里，不会发送到服务器）；来自环境变量的令牌不在终端回显。默认只监听回环地址，并校验 `Host` 头以防 DNS 重绑定；写操作拒绝跨站请求。更推荐只通过 tailnet 访问，这样可以复用 Tailscale 的身份认证和 ACL。
+
+### 4.11 Bacarra 路由劫持引擎实现细节〔无来源·设计决策〕
+
+#### 4.11.1 官方 Tailscale 网卡自动探测与校验
+Bacarra 启动时执行严格的适配器自动发现与验证机制，坚决执行 Fail-Fast 原则，严禁静默回退或伪造适配器：
+1. **接口枚举**：
+   - Windows：调用 `winipcfg.GetAdaptersAddresses`，匹配友好名称或描述包含 `Tailscale` 或 `Wintun` 的适配器，校验 `IfOperStatus == IfOperStatusUp`，获取其 `winipcfg.LUID` 与接口索引 [来源 S11][来源 S54]。
+   - Linux：调用 `net.Interfaces()`，匹配以 `tailscale` 开头且处于 `net.FlagUp` 状态的网卡。
+   - macOS：调用 `net.Interfaces()`，匹配以 `utun` 开头且处于 `net.FlagUp` 状态的网卡。
+2. **地址有效性核验**：
+   - 提取该网卡绑定的全部单播 IP，必须存在属于 RFC 6598 CGNAT 网段（`100.64.0.0/10`）或 Tailscale IPv6 ULA 网段（`fd7a:115c:a1e0::/48`）的有效地址 [来源 S7][来源 S19]。若未发现或网卡离线，立即返回 `ErrTailscaleNotDetected`。
+
+#### 4.11.2 路由注入与增量 Diff 管理
+- **注入网段集合**：
+  - FakeIP 地址池：IPv4 `198.18.0.0/15`，IPv6 `fc00::/18`。
+  - 规则引擎 `rules` 中配置的有效 `ip_cidr` 前缀列表。
+- **增量 Diff 计算**：
+  - 比较期望网段集合（`want`）与当前已注入网段集合（`applied`）。
+  - 新增网段调用底层驱动 `AddRoute`，已剔除网段调用 `DeleteRoute`，未变网段保持不变。操作具有幂等性。
+
+#### 4.11.3 跨平台路由驱动与 Windows NextHop 处理
+各操作系统对虚拟网卡路由的处理存在底层差异：
+1. **Windows 下 NextHop 关键机制**：
+   - **痛点**：在 Windows 上，若通过 IP Helper API 向虚拟网卡添加子网路由时将 NextHop 留空或设为 `0.0.0.0`，Windows 协议栈会将该路由标记为「链路直连（on-link）」。当应用发起连接时，Windows 会尝试在该链路发送 ARP/广播广播解析，导致对子网广播地址或未分配 IP 的套接字连接返回 `WSAEADDRNOTAVAIL` (10049 错误) [来源 S60][来源 S61]。
+   - **解决方案**：在 Windows 上注入子网路由时，必须显式指定 NextHop 为 Tailscale 的保留服务 IP：
+     - IPv4：`100.100.100.100`（`tsaddr.TailscaleServiceIP()`，即 MagicDNS Quad-100 地址）[来源 S62]。
+     - IPv6：`tsaddr.TailscaleServiceIPv6()`。
+     显式指定网关后，Windows 将数据包直接送入 Tailscale 虚拟网卡队列，由 Tailscale 驱动直接接管加密转发。
+   - **容错处理**：驱动自动捕获并吸收 `ERROR_OBJECT_ALREADY_EXISTS` (0x1392 / 183) 与 `ERROR_NOT_FOUND` (1168 / 2)。
+2. **Linux 路由驱动**：
+   - 基于 `github.com/jsimonetti/rtnetlink` 纯 Go netlink 客户端，向内核 `RT_TABLE_MAIN` 表发送 `RouteMessage`，设置 `RTPROT_BOOT`、`RT_SCOPE_LINK`、`RTN_UNICAST`，指定 `OutIface = adapter.Index`。
+   - 删除操作容忍 `ESRCH` 与 `ENOENT`；当内核禁用 IPv6 时容忍 `EAFNOSUPPORT` 与 `EOPNOTSUPP`。
+3. **macOS 路由驱动**：
+   - 调用系统原生 `/sbin/route -q -n add/delete -inet/-inet6 <prefix> -interface <ifName>`。
+   - 注入前先执行静默删除以消除残留冲突条目。
+
+#### 4.11.4 状态持久化与崩溃恢复（Crash Recovery）
+1. **状态文件持久化**：
+   - 每次路由变更后，将当前活动的适配器名称、索引、时间戳及路由网段列表以 JSON 格式原子保存至 `<stateDir>/bacarra_routes.json`。
+   - 写入机制：先写入临时文件 `.bacarra_routes.<nanos>.tmp`（权限 0600），再原子 rename 替换目标文件；Windows 上若目标文件已存在先执行删除再 rename。
+2. **三级崩溃恢复防线**：
+   - **正常关机**：进程收到 SIGINT/SIGTERM 时，`eng.Close()` 遍历已应用路由调用底层驱动删除，并清除 `bacarra_routes.json`。
+   - **启动自愈**：每次 tailproxy 启动初始化引擎前，`cmdRun` 率先调用 `bacarra.TeardownStale(stateDir)`，检查是否存在上次崩溃遗留的 `bacarra_routes.json`，若存在则按文件中记录的网卡与路由列表执行逆向删除并清理文件。
+   - **紧急手动恢复**：用户或运维执行 `sudo tailproxy capture down [--state-dir DIR]` 时，主动探测并调用 `TeardownStale` 清理残留的主机路由表项。
 
 ---
 
@@ -419,3 +547,8 @@ rules:
 | S58 | Firefox 企业策略 DNSOverHTTPS（Windows GPO 注册表路径、Linux `/etc/firefox/policies`、macOS `Firefox.app/Contents/Resources/distribution`）：https://mozilla.github.io/policy-templates/ |
 | S59 | Google：用 Windows 注册表管理 Chrome 策略：https://support.google.com/chrome/a/answer/9131254 |
 | S27 | Apple TN3120 – Expected use cases for Network Extension packet tunnel providers：https://developer.apple.com/documentation/technotes/tn3120-expected-use-cases-for-network-extension-packet-tunnel-providers |
+| S60 | Microsoft Learn – Windows Sockets Error Codes (WSAEADDRNOTAVAIL 10049)：https://learn.microsoft.com/en-us/windows/win32/winsock/windows-sockets-error-codes-2 |
+| S61 | wireguard-windows issue #18 – Subnet routes require gateway to avoid on-link broadcast resolution failures：https://git.zx2c4.com/wireguard-windows |
+| S62 | Tailscale Docs – MagicDNS Quad-100 Service IP (100.100.100.100)：https://tailscale.com/kb/1081/magicdns |
+| S63 | Linux rtnetlink(7) – Linux IPv4/IPv6 route socket interface：https://man7.org/linux/man-pages/man7/rtnetlink.7.html |
+| S64 | macOS route(8) – Manual routing table manipulation tool：https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man8/route.8.html |

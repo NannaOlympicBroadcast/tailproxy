@@ -15,19 +15,37 @@
   - 插件只包含技能（Cowork 不安装带顶层 `bin/` 的插件），命令在 Cowork 会话所在的电脑上执行，所以要让 Cowork 运行在需要配置的那台机器上；需要 root、修改系统或涉及密钥的步骤都会先征得同意，auth key 和中继令牌不经过对话。
 - **从源码构建**：见下一节。
 
+## 双内核架构（Dual-Kernel）
+
+tailproxy 支持两种透明代理内核模式，通过 `config.yaml` 的 `kernel` 字段配置（默认为 `davin`）：
+
+1. **Davin 内核模式**（`kernel: davin`，默认）：
+   - 基于内嵌的 multi-slot `tsnet.Server` 架构，为每个出口槽位维护独立的虚拟 Tailscale 节点。
+   - 适用于未安装官方 Tailscale 客户端的主机、路由器或容器环境。
+   - 支持 SOCKS5 入口、Linux TPROXY 与跨平台 TUN 设备透明捕获。
+
+2. **Bacarra 内核模式**（`kernel: bacarra`）：
+   - 专为已安装并运行官方 Tailscale 客户端（`tailscaled` / Tailscale GUI）的系统设计。
+   - **无需**创建任何额外的内嵌 tsnet 节点，避免重复认证与内网 IP 占用。
+   - 自动探测本机官方 Tailscale 虚拟网卡（Windows `Tailscale` / `winipcfg.LUID`、Linux `tailscale0`、macOS `utun*`），并校验是否具备 CGNAT `100.64.0.0/10` 或 IPv6 ULA `fd7a:115c:a1e0::/48` 范围地址。
+   - 劫持主机路由表：将 FakeIP 地址池（`198.18.0.0/15`、`fc00::/18`）与规则配置的 `ip_cidr` 目标网段直接注入到 Tailscale 网卡，迫使匹配流量由系统网络栈送入官方 Tailscale 出口节点；直连流量保持宿主原有物理路由不受干扰。
+   - 运行状态持久化于 `<stateDir>/bacarra_routes.json`；支持服务退出自动撤销、崩溃重启预清理与 `tailproxy capture down` 故障恢复。
+   - **权限要求**：Bacarra 模式直接操作操作系统路由表，需要管理员权限（Windows 需 Administrator，Linux/macOS 需 root / `CAP_NET_ADMIN`）。
+
 ## 当前进度
 
 | 模块 | 状态 |
 |---|---|
-| 配置加载与校验（`internal/config`） | 已实现 |
+| 双内核架构抽象（Davin 嵌入式 tsnet 模式 / Bacarra 官方客户端路由劫持模式，`internal/kernel`） | 已实现；驱动注册、适配器自动探测、路由动态劫持与安全清理 |
+| 配置加载与校验（`internal/config`，支持 `kernel: davin \| bacarra`） | 已实现 |
 | 规则引擎（`internal/rule`，首条命中；keyword / suffix / domain / ip_cidr / outer_sni / port） | 已实现 |
-| Web 面板 + REST API + `/metrics`（`internal/panel`，端口 7708） | 已实现 |
-| 命令行 start / stop / status / token、systemd 开机自启 | 已实现 |
+| Web 面板 + REST API + `/metrics`（`internal/panel`，端口 7708，支持内核状态与组件感知） | 已实现 |
+| 命令行 start / stop / status / check / token、systemd 开机自启 | 已实现 |
 | 出口管理器（`internal/egress`）：每个出口一个内嵌 tsnet 节点、固定出口节点、经出口的 DoH 解析、故障转移 / 延迟优选组与健康检查 | 已实现；出口节点出口已在真实 tailnet 上验证（见下文），出口组尚未在真实环境验证 |
 | SOCKS5 入口（`internal/proxy`，CONNECT + UDP ASSOCIATE、仅回环地址）+ 连接追踪 | 已实现；UDP ASSOCIATE 有单元测试，并用 PySocks 1.7.1 客户端互通测试过 |
 | 中继出口（`tailproxy relay` + `internal/relay`）：客户端只用一台 tailnet 设备就能有多个出口 | 已实现；已在真实 tailnet（中国 + 美国 VPS）上端到端验证 |
 | Linux 透明捕获（`capture.mode: tproxy`）：nftables TPROXY + 策略路由、FakeIP / 分流 DNS、SNI / HTTP Host 嗅探、DNS 劫持、防回环 | 已实现；在网络命名空间里做了端到端集成测试，**尚未在真实路由器 / OpenWrt 上验证** |
-| `tpctl` 本机命令行：管理 tailproxy + 内置官方 tailscale 客户端（操作主节点）+ schema | 已实现；Linux / macOS 走 Unix 套接字，Windows 走命名管道（由 CI 在真实 Windows 上验证） |
+| `tpctl` 本机命令行：管理 tailproxy + 内置官方 tailscale 客户端（操作主节点）+ check / schema | 已实现；Linux / macOS 走 Unix 套接字，Windows 走命名管道（由 CI 在真实 Windows 上验证） |
 | UDP 代理（Linux 透明捕获，`capture.udp: proxy`）：按规则经出口节点 / 直连转发 UDP（如 QUIC） | 已实现；网络命名空间集成测试覆盖，**尚未在真实路由器和出口节点上验证**；中继出口不承载 UDP |
 | TUN 模式（`capture.mode: tun`）：TUN 设备 + gVisor 用户态协议栈，路由 + 协议栈内 DNS | Linux / macOS（utun）/ Windows（Wintun）已实现，三个平台都在 GitHub Actions 上用真实 TUN 设备跑通集成测试（DNS→FakeIP、TCP、UDP 到出口）；运行时自动把系统 DNS 指向协议栈内 DNS、退出时恢复（`capture.tun_system_dns`，CI 中三个平台都用系统解析器验证过）；Windows 需要 `wintun.dll`；支持 selective 和 all 范围（all：Linux 在网络命名空间里用真实设备测试）；Android / iOS 走移动端 SDK（应用为 TODO）；尚未在真实桌面上长期使用 |
 | 嵌入式 SDK（`sdk`）：在其他 Go 程序里内嵌 tailproxy——经规则拨号（`DialContext` / `HTTPClient`）、SOCKS5 入口、接管 VPN 的 TUN 设备或文件描述符 | 已实现；单元测试 + 网络命名空间里用真实 TUN 文件描述符的集成测试（CI） |

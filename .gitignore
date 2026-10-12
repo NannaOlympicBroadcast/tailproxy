@@ -1,1 +1,4 @@
 /tailproxy
+.agents/
+*.pid
+bacarra_routes.json

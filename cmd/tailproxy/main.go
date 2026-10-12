@@ -24,11 +24,17 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/config"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/egress"
+	"github.com/NannaOlympicBroadcast/tailproxy/internal/kernel"
+	_ "github.com/NannaOlympicBroadcast/tailproxy/internal/kernel/bacarra"
+	"github.com/NannaOlympicBroadcast/tailproxy/internal/kernel/bacarra"
+	_ "github.com/NannaOlympicBroadcast/tailproxy/internal/kernel/davin"
+	"github.com/NannaOlympicBroadcast/tailproxy/internal/kernel/davin"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/panel"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/proxy"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/service"
@@ -240,35 +246,64 @@ func cmdRun(args []string) (err error) {
 	}
 	defer ln.Close()
 
-	// Egress slots and the SOCKS5 inbound. Listeners are bound before
-	// readiness is reported, so a busy port fails `tailproxy start`.
+	// Clean up any stale host routes from a previous unclean shutdown
+	if err := bacarra.TeardownStale(f.paths.Dir, log.Printf); err != nil {
+		log.Printf("tailproxy: cleanup stale bacarra routes: %v", err)
+	}
+
 	cfg := p.Config()
-	mgr, err := egress.New(cfg, f.paths.Dir, log.Printf)
+	eng, err := kernel.New(cfg, f.paths.Dir, log.Printf)
 	if err != nil {
 		return err
 	}
-	tracker := proxy.NewTracker()
-	router := &proxy.Router{Rules: p.Engine, Egress: mgr, Tracker: tracker}
-	rt := &runtimeView{egress: mgr, tracker: tracker}
-	var socksLn net.Listener
-	if cfg.Capture.SocksListen != "" {
-		if socksLn, err = proxy.ListenSOCKS(cfg.Capture.SocksListen); err != nil {
-			return err
+	defer func() {
+		if err := eng.Close(); err != nil {
+			log.Printf("tailproxy: kernel close: %v", err)
 		}
-		defer socksLn.Close()
-		rt.socksAddr = socksLn.Addr().String()
-	}
-	if cfg.Capture.Mode == config.CaptureTProxy || cfg.Capture.Mode == config.CaptureTUN {
-		capt, err := setupCapture(cfg, p.Engine, router, f.paths.Dir)
-		if err != nil {
-			return err
+		if err := eng.Teardown(); err != nil {
+			log.Printf("tailproxy: kernel teardown: %v", err)
 		}
-		defer capt.Close()
-		rt.capture = capt
+	}()
+
+	rt := &runtimeView{engine: eng}
+	var (
+		socksLn net.Listener
+		router  *proxy.Router
+		mgr     *egress.Manager
+	)
+
+	if davinEng, ok := eng.(*davin.Engine); ok {
+		mgr = davinEng.Manager()
+		router = davinEng.Router()
+		router.Rules = p.Engine
+		rt.egress = mgr
+		rt.tracker = davinEng.Tracker()
+
+		if cfg.Capture.SocksListen != "" {
+			if socksLn, err = proxy.ListenSOCKS(cfg.Capture.SocksListen); err != nil {
+				return err
+			}
+			defer socksLn.Close()
+			rt.socksAddr = socksLn.Addr().String()
+		}
+		if cfg.Capture.Mode == config.CaptureTProxy || cfg.Capture.Mode == config.CaptureTUN {
+			capt, err := setupCapture(cfg, p.Engine, router, f.paths.Dir)
+			if err != nil {
+				return err
+			}
+			defer capt.Close()
+			rt.capture = capt
+		}
+	} else if bacarraEng, ok := eng.(*bacarra.Engine); ok {
+		bacarraEng.SetRules(p.Engine)
 	}
 	p.SetRuntime(rt)
 
-	st := service.State{PID: os.Getpid(), URL: p.URL(), Config: f.config, TokenEnv: p.TokenEnv(), TokenFile: p.TokenFile(), Started: time.Now()}
+	kernelMode := string(eng.Type())
+	st := service.State{
+		PID: os.Getpid(), Kernel: kernelMode, URL: p.URL(), Config: f.config,
+		TokenEnv: p.TokenEnv(), TokenFile: p.TokenFile(), Started: time.Now(),
+	}
 	localAPI, err := localAPIPath(f.paths.LocalAPI)
 	if err != nil {
 		log.Printf("tailproxy: LocalAPI socket (tpctl ts) disabled: %v", err)
@@ -317,9 +352,10 @@ func cmdRun(args []string) (err error) {
 		<-ctx.Done()
 		service.Notify("STOPPING=1")
 	}()
-	mgr.Start(ctx)
-	defer mgr.Close()
-	if localAPI != "" {
+	if err := eng.Start(ctx); err != nil {
+		return fmt.Errorf("kernel start: %w", err)
+	}
+	if mgr != nil && localAPI != "" {
 		if err := serveLocalAPI(ctx, localAPI, mgr.DialLocalAPI); err != nil {
 			log.Printf("tailproxy: LocalAPI socket (tpctl ts): %v", err)
 		}
@@ -327,7 +363,7 @@ func cmdRun(args []string) (err error) {
 	if rt.capture != nil {
 		go rt.capture.Serve(ctx)
 	}
-	if p.TailnetRequested() {
+	if mgr != nil && p.TailnetRequested() {
 		// Same port as panel.listen, on the main node's tailnet addresses.
 		_, portStr, _ := net.SplitHostPort(ln.Addr().String())
 		port, _ := strconv.Atoi(portStr)
@@ -339,7 +375,7 @@ func cmdRun(args []string) (err error) {
 			}
 		})
 	}
-	if socksLn != nil {
+	if socksLn != nil && router != nil {
 		socks := &proxy.SOCKS{Router: router, Logf: log.Printf}
 		go func() {
 			if err := socks.Serve(ctx, socksLn); err != nil {
@@ -405,6 +441,9 @@ func cmdStatus(args []string) error {
 	}
 	fmt.Printf("tailproxy 正在运行（%s）\n", mode)
 	fmt.Printf("  pid       %d\n", st.PID)
+	if st.Kernel != "" {
+		fmt.Printf("  内核模式  %s\n", st.Kernel)
+	}
 	fmt.Printf("  面板地址  %s\n", st.URL)
 	fmt.Printf("  已运行    %s（启动于 %s）\n", time.Since(st.Started).Round(time.Second), st.Started.Format(time.DateTime))
 	fmt.Printf("  配置文件  %s\n", st.Config)
@@ -418,6 +457,12 @@ func cmdStatus(args []string) error {
 		fmt.Printf("  访问令牌  持久化保存在 %s（tailproxy token 查看）\n", st.TokenFile)
 	default:
 		fmt.Printf("  访问令牌  一次性令牌（--ephemeral-token），只在启动时打印过\n")
+	}
+	if st.Kernel == "bacarra" {
+		if rs, err := bacarra.ReadRouteState(paths.Dir); err == nil && rs != nil && len(rs.Routes) > 0 {
+			fmt.Printf("  Tailscale 网卡  %s (索引 %d)\n", rs.AdapterName, rs.AdapterIndex)
+			fmt.Printf("  劫持路由网段    %d 条 (%s)\n", len(rs.Routes), strings.Join(rs.Routes, ", "))
+		}
 	}
 	return nil
 }

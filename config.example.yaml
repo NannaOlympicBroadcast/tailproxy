@@ -1,4 +1,10 @@
 # tailproxy 配置示例，字段说明见 docs/DESIGN.md §5。
+
+# 代理内核引擎模式：
+# - davin: 内嵌 tsnet 模式（默认），每个出口槽位启动独立 tsnet 节点，无需本机安装 Tailscale 客户端。
+# - bacarra: 宿主机路由劫持模式，直接复用本机已运行的官方 Tailscale 客户端，通过劫持宿主机路由表将流量导向出口节点。
+kernel: davin
+
 tailnet:
   control_url: https://controlplane.tailscale.com
   auth_key_env: TS_AUTHKEY          # 不把密钥写进文件

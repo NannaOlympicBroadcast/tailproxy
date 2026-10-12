@@ -63,6 +63,7 @@ func (p Paths) Ensure() error {
 // State describes a running tailproxy instance.
 type State struct {
 	PID       int       `json:"pid"`
+	Kernel    string    `json:"kernel,omitempty"` // "davin" | "bacarra"
 	URL       string    `json:"url"`
 	Config    string    `json:"config"`
 	Log       string    `json:"log,omitempty"`        // empty when running in the foreground

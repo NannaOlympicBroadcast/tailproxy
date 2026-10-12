@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -10,6 +11,9 @@ func TestExampleConfigParses(t *testing.T) {
 	c, err := Load("../../config.example.yaml")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if c.Kernel != KernelDavin {
+		t.Fatalf("kernel = %q, want %q", c.Kernel, KernelDavin)
 	}
 	if c.Panel.Listen != "127.0.0.1:7708" {
 		t.Fatalf("panel.listen = %q", c.Panel.Listen)
@@ -27,6 +31,9 @@ func TestDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if c.Kernel != KernelDavin {
+		t.Fatalf("default kernel = %q, want %q", c.Kernel, KernelDavin)
+	}
 	if c.Panel.Listen != DefaultPanelListen {
 		t.Fatalf("default listen = %q", c.Panel.Listen)
 	}
@@ -39,6 +46,7 @@ func TestValidateErrors(t *testing.T) {
 	tests := []struct {
 		name, yaml, want string
 	}{
+		{"invalid kernel", "kernel: invalid\nrules: []\n", "kernel"},
 		{"unknown field", "egres: []", "field egres not found"},
 		{"reserved name", "egress: [{name: direct, exit_node: x}]", "reserved"},
 		{"duplicate", "egress: [{name: a, exit_node: x}, {name: a, exit_node: y}]", "duplicate"},
@@ -130,3 +138,44 @@ func TestCaptureConfig(t *testing.T) {
 		t.Errorf("egress:us rejected: %v", err)
 	}
 }
+
+func TestKernelConfig(t *testing.T) {
+	// 1. Omitted kernel defaults to davin for backward compatibility
+	cDefault, err := Parse([]byte("rules: []\n"))
+	if err != nil {
+		t.Fatalf("parse omitted kernel: %v", err)
+	}
+	if cDefault.Kernel != KernelDavin {
+		t.Errorf("default kernel = %q, want %q", cDefault.Kernel, KernelDavin)
+	}
+
+	// 2. Explicit davin passes validation
+	cDavin, err := Parse([]byte("kernel: davin\nrules: []\n"))
+	if err != nil {
+		t.Fatalf("parse explicit davin: %v", err)
+	}
+	if cDavin.Kernel != KernelDavin {
+		t.Errorf("kernel = %q, want %q", cDavin.Kernel, KernelDavin)
+	}
+
+	// 3. Explicit bacarra passes validation
+	cBacarra, err := Parse([]byte("kernel: bacarra\nrules: []\n"))
+	if err != nil {
+		t.Fatalf("parse explicit bacarra: %v", err)
+	}
+	if cBacarra.Kernel != KernelBacarra {
+		t.Errorf("kernel = %q, want %q", cBacarra.Kernel, KernelBacarra)
+	}
+
+	// 4. Invalid kernel values fail validation
+	badKernels := []string{"invalid", "unknown", "tsnet", "wireguard", "none", "123"}
+	for _, bad := range badKernels {
+		yamlStr := fmt.Sprintf("kernel: %s\nrules: []\n", bad)
+		if _, err := Parse([]byte(yamlStr)); err == nil {
+			t.Errorf("expected error for bad kernel %q, got nil", bad)
+		} else if !strings.Contains(err.Error(), "kernel") {
+			t.Errorf("expected error message to mention kernel for %q, got %v", bad, err)
+		}
+	}
+}
+

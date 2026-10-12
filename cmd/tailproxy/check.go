@@ -50,7 +50,11 @@ func check(args []string, out io.Writer) error {
 	if socks == "" {
 		socks = "关闭"
 	}
-	fmt.Fprintf(out, "%s：配置有效\n  出口 %d 个、出口组 %d 个，规则 %d 条\n  捕获模式 %s（范围 %s），SOCKS5 %s，DNS %s\n  面板 %s\n",
-		*path, slots, groups, eng.Len(), cfg.Capture.Mode, cfg.Capture.Scope, socks, cfg.DNS.Mode, cfg.Panel.Listen)
+	kernel := cfg.Kernel
+	if kernel == "" {
+		kernel = "davin"
+	}
+	fmt.Fprintf(out, "%s：配置有效\n  内核模式 %s\n  出口 %d 个、出口组 %d 个，规则 %d 条\n  捕获模式 %s（范围 %s），SOCKS5 %s，DNS %s\n  面板 %s\n",
+		*path, kernel, slots, groups, eng.Len(), cfg.Capture.Mode, cfg.Capture.Scope, socks, cfg.DNS.Mode, cfg.Panel.Listen)
 	return nil
 }

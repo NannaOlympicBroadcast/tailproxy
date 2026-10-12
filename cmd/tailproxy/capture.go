@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -23,8 +24,10 @@ import (
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/dnsserver"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/fakeip"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/iplearn"
+	"github.com/NannaOlympicBroadcast/tailproxy/internal/kernel/bacarra"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/proxy"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/rule"
+	"github.com/NannaOlympicBroadcast/tailproxy/internal/service"
 	"github.com/NannaOlympicBroadcast/tailproxy/internal/tunstack"
 	"github.com/tailscale/wireguard-go/tun"
 )
@@ -542,31 +545,81 @@ func (c *captureRuntime) Summary() (capState, capDetail, dnsState, dnsDetail str
 	return "running", capDetail, "running", dnsDetail
 }
 
+func parseCaptureArgs(args []string) (subcmd string, stateDir string, err error) {
+	fs := flag.NewFlagSet("capture", flag.ContinueOnError)
+	fs.StringVar(&stateDir, "state-dir", "", "state directory (default ~/.lighthousepro)")
+
+	var filtered []string
+	for _, arg := range args {
+		if arg == "down" {
+			subcmd = "down"
+		} else {
+			filtered = append(filtered, arg)
+		}
+	}
+	if err := fs.Parse(filtered); err != nil {
+		return "", "", err
+	}
+	if subcmd != "down" || fs.NArg() > 0 {
+		return "", "", errors.New("用法：tailproxy capture down [--state-dir DIR]   # 删除 tailproxy 的 nftables 表和策略路由、恢复系统 DNS、清理 Bacarra 残留路由（崩溃后恢复网络用）")
+	}
+	if stateDir == "" {
+		if d, err := service.DefaultDir(); err == nil {
+			stateDir = d
+		}
+	}
+	return subcmd, stateDir, nil
+}
+
 // cmdCapture implements `tailproxy capture down`: remove leftover rules
 // after a crash (also run by the systemd unit's ExecStopPost), and put back
-// system DNS that a crashed TUN run left pointing at its stack (macOS).
+// system DNS that a crashed TUN run left pointing at its stack (macOS), as well
+// as stale host routes from Bacarra mode.
 func cmdCapture(args []string) error {
-	if len(args) != 1 || args[0] != "down" {
-		return errors.New("用法：tailproxy capture down   # 删除 tailproxy 的 nftables 表和策略路由、恢复系统 DNS（崩溃后恢复网络用）")
+	subcmd, stateDir, err := parseCaptureArgs(args)
+	if err != nil {
+		return err
 	}
-	if !capture.Supported && !tunstack.Supported {
+	_ = subcmd
+
+	if !capture.Supported && !tunstack.Supported && stateDir == "" {
 		return nil
 	}
 	if !isAdmin() {
 		return errors.New("tailproxy capture down 需要 root / 管理员权限")
 	}
+
 	var errs []error
 	if capture.Supported {
 		errs = append(errs, capture.Teardown())
 	}
-	errs = append(errs, tunstack.Cleanup())
+	if tunstack.Supported {
+		errs = append(errs, tunstack.Cleanup())
+	}
+
+	// Clean up stale Bacarra host routes
+	var bacarraCleaned bool
+	if stateDir != "" {
+		if st, readErr := bacarra.ReadRouteState(stateDir); readErr == nil && st != nil && len(st.Routes) > 0 {
+			bacarraCleaned = true
+		}
+		if err := bacarra.TeardownStale(stateDir, log.Printf); err != nil {
+			errs = append(errs, fmt.Errorf("bacarra stale route teardown: %w", err))
+		}
+	}
+
 	if err := errors.Join(errs...); err != nil {
 		return err
 	}
+
 	if capture.Supported {
 		fmt.Println("已删除 nftables 表 inet " + capture.TableName + " 和策略路由（fwmark " + strconv.Itoa(capture.RouteMark) + " → table " + strconv.Itoa(capture.RouteTable) + "）")
-	} else {
+	}
+	if tunstack.Supported {
 		fmt.Println("已清理 TUN 模式的残留设置（系统 DNS）")
+	}
+	if bacarraCleaned {
+		fmt.Println("已清理 Bacarra 模式残留的主机路由表项")
 	}
 	return nil
 }
