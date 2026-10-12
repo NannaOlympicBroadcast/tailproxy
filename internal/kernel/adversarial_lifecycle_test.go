@@ -207,13 +207,13 @@ type mockEngineStub struct {
 	mode kernel.Mode
 }
 
-func (m *mockEngineStub) Type() kernel.Mode                                      { return m.mode }
-func (m *mockEngineStub) Start(ctx context.Context) error                        { return nil }
-func (m *mockEngineStub) Close() error                                           { return nil }
-func (m *mockEngineStub) Reload(cfg *config.Config, rules *rule.Engine) error    { return nil }
-func (m *mockEngineStub) Status() any                                            { return map[string]string{"mode": string(m.mode)} }
-func (m *mockEngineStub) Components() []panel.Component                        { return nil }
-func (m *mockEngineStub) Teardown() error                                        { return nil }
+func (m *mockEngineStub) Type() kernel.Mode                                   { return m.mode }
+func (m *mockEngineStub) Start(ctx context.Context) error                     { return nil }
+func (m *mockEngineStub) Close() error                                        { return nil }
+func (m *mockEngineStub) Reload(cfg *config.Config, rules *rule.Engine) error { return nil }
+func (m *mockEngineStub) Status() any                                         { return map[string]string{"mode": string(m.mode)} }
+func (m *mockEngineStub) Components() []panel.Component                       { return nil }
+func (m *mockEngineStub) Teardown() error                                     { return nil }
 
 // =============================================================================
 // Objective 2: Crash Recovery in TeardownStale Under Edge Cases

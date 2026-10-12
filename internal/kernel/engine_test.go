@@ -217,4 +217,3 @@ func TestRegistryAndNew(t *testing.T) {
 		t.Fatal("New with unregistered mode expected error, got nil")
 	}
 }
-

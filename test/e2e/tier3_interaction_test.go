@@ -90,17 +90,17 @@ func TestTier3_Interaction_RuleEngineRoutedPrefixes(t *testing.T) {
 // T3.I3: Staged route diffing correctly identifies additions, removals, and unchanged routes.
 func TestTier3_Interaction_DynamicReloadRouteDiffing(t *testing.T) {
 	initialRoutes := []netip.Prefix{
-		netip.MustParsePrefix("198.18.0.0/15"),  // FakeIP IPv4
-		netip.MustParsePrefix("fc00::/18"),      // FakeIP IPv6
-		netip.MustParsePrefix("91.108.4.0/22"),  // Old rule
-		netip.MustParsePrefix("1.1.1.0/24"),     // Common rule
+		netip.MustParsePrefix("198.18.0.0/15"), // FakeIP IPv4
+		netip.MustParsePrefix("fc00::/18"),     // FakeIP IPv6
+		netip.MustParsePrefix("91.108.4.0/22"), // Old rule
+		netip.MustParsePrefix("1.1.1.0/24"),    // Common rule
 	}
 
 	newRoutes := []netip.Prefix{
-		netip.MustParsePrefix("198.18.0.0/15"),  // FakeIP IPv4 (unchanged)
-		netip.MustParsePrefix("fc00::/18"),      // FakeIP IPv6 (unchanged)
-		netip.MustParsePrefix("1.1.1.0/24"),     // Common rule (unchanged)
-		netip.MustParsePrefix("8.8.8.0/24"),     // Added rule
+		netip.MustParsePrefix("198.18.0.0/15"),    // FakeIP IPv4 (unchanged)
+		netip.MustParsePrefix("fc00::/18"),        // FakeIP IPv6 (unchanged)
+		netip.MustParsePrefix("1.1.1.0/24"),       // Common rule (unchanged)
+		netip.MustParsePrefix("8.8.8.0/24"),       // Added rule
 		netip.MustParsePrefix("149.154.160.0/20"), // Added rule
 	}
 

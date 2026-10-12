@@ -41,7 +41,6 @@ func platformDriverForState(state *RouteState) (RouteDriver, error) {
 	return nil, fmt.Errorf("bacarra: cannot locate adapter for stale teardown: %w", err)
 }
 
-
 func (d *windowsDriver) AddRoute(p netip.Prefix) error {
 	nextHop := NextHopForPrefix(p)
 	// Metric 0 or 1 for injected subnet routes

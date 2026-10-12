@@ -120,4 +120,3 @@ func New(cfg *config.Config, stateDir string, logf func(string, ...any)) (Engine
 	}
 	return factory(cfg, stateDir, logf)
 }
-
